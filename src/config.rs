@@ -1,8 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{
-    LedPixel, Rgb, Rgb16, Rgbw, SingleWireProtocol, Sk6812, Ws2811, Ws2812B, Ws2816,
-};
+use crate::{LedPixel, Rgb, Rgb16, Rgbw, SingleWireProtocol, Sk6812, Ws2811, Ws2812B, Ws2816};
 
 /// Compile-time-verified LED strip configuration.
 ///
@@ -111,7 +109,7 @@ impl LedStripConfig<Rgb16, Ws2816> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RgbOrder, RgbwOrder, Rgb16Order};
+    use crate::{Rgb16Order, RgbOrder, RgbwOrder};
 
     #[test]
     fn ws2812b_config_defaults_to_grb() {

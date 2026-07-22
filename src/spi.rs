@@ -285,8 +285,7 @@ impl SpiCodec {
             return usize::MAX;
         };
 
-        let total_bytes =
-            scaled_cycles.saturating_add(8_000_000_000_u64 - 1) / 8_000_000_000_u64;
+        let total_bytes = scaled_cycles.saturating_add(8_000_000_000_u64 - 1) / 8_000_000_000_u64;
 
         usize::try_from(total_bytes).unwrap_or(usize::MAX)
     }
@@ -539,10 +538,11 @@ fn append_pattern<const TX_CAPACITY: usize>(
 
         *used_bits += 1;
         if *used_bits == 8 {
-            out.push(*current_byte).map_err(|_| LedStripError::BufferTooSmall {
-                required: TX_CAPACITY.saturating_add(1),
-                capacity: TX_CAPACITY,
-            })?;
+            out.push(*current_byte)
+                .map_err(|_| LedStripError::BufferTooSmall {
+                    required: TX_CAPACITY.saturating_add(1),
+                    capacity: TX_CAPACITY,
+                })?;
 
             *current_byte = 0;
             *used_bits = 0;
@@ -940,8 +940,8 @@ mod tests {
 
     // ── Mock SPI transmit ────────────────────────────────────────────
 
-    use embedded_hal::spi::SpiBus;
     use core::cell::Cell;
+    use embedded_hal::spi::SpiBus;
 
     #[derive(Debug, Default)]
     struct MockSpi(Cell<usize>);
@@ -951,14 +951,22 @@ mod tests {
     }
 
     impl SpiBus<u8> for MockSpi {
-        fn read(&mut self, _words: &mut [u8]) -> Result<(), Self::Error> { Ok(()) }
+        fn read(&mut self, _words: &mut [u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
         fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
             self.0.set(words.len());
             Ok(())
         }
-        fn transfer(&mut self, _read: &mut [u8], _write: &[u8]) -> Result<(), Self::Error> { Ok(()) }
-        fn transfer_in_place(&mut self, _words: &mut [u8]) -> Result<(), Self::Error> { Ok(()) }
-        fn flush(&mut self) -> Result<(), Self::Error> { Ok(()) }
+        fn transfer(&mut self, _read: &mut [u8], _write: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn transfer_in_place(&mut self, _words: &mut [u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -975,8 +983,8 @@ mod tests {
 
     #[test]
     fn encode_sk6812_produces_correct_length() {
-        let codec = SpiCodec::for_protocol::<Rgbw, Sk6812>(SpiEncodingPlan::sk6812_4bit(), false)
-            .unwrap();
+        let codec =
+            SpiCodec::for_protocol::<Rgbw, Sk6812>(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
         let config = LedStripConfig::sk6812(2);
         let pixels = [Rgbw::new(0, 0, 0, 0), Rgbw::new(0, 0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
@@ -1014,14 +1022,15 @@ mod tests {
     fn extra_reset_ns_increases_encoded_len() {
         let plan_normal = SpiEncodingPlan::ws281x_3bit();
         let plan_extra = SpiEncodingPlan::ws281x_3bit().with_extra_reset_ns(100_000);
-        let codec_normal =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_normal, false).unwrap();
-        let codec_extra =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_extra, false).unwrap();
+        let codec_normal = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_normal, false).unwrap();
+        let codec_extra = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_extra, false).unwrap();
         let config = LedStripConfig::ws2812b(1);
         let len_normal = codec_normal.encoded_len(&config);
         let len_extra = codec_extra.encoded_len(&config);
-        assert!(len_extra > len_normal, "extra reset should increase encoded length");
+        assert!(
+            len_extra > len_normal,
+            "extra reset should increase encoded length"
+        );
     }
 
     // ── Plan validation edge cases ───────────────────────────────────
@@ -1039,9 +1048,7 @@ mod tests {
         let err = SpiCodec::new(plan, false).unwrap_err();
         assert_eq!(
             err,
-            SpiCodecPlanError::BitsPerSymbolTooWide {
-                bits_per_symbol: 9,
-            }
+            SpiCodecPlanError::BitsPerSymbolTooWide { bits_per_symbol: 9 }
         );
     }
 

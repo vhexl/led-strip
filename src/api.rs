@@ -235,7 +235,9 @@ where
         self.frame.clear();
     }
 
-    pub fn refresh(&mut self) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
+    pub fn refresh(
+        &mut self,
+    ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
         self.codec
             .encode(&self.config, self.frame.as_slice(), &mut self.tx_buf)
             // Lift structural errors to top-level; wrap codec-specific errors
@@ -258,7 +260,9 @@ where
             .map_err(|error| LedStripError::Operation(RefreshError::Backend(error)))
     }
 
-    pub fn clear(&mut self) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
+    pub fn clear(
+        &mut self,
+    ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
         self.clear_pixels();
         self.refresh()
     }
@@ -497,7 +501,10 @@ mod tests {
         strip.refresh().unwrap();
         let tx_len = strip.backend.last_tx_len();
         // 2 pixels × 9 bytes + reset → should be non-zero
-        assert!(tx_len > 0, "expected non-zero transmit length, got {tx_len}");
+        assert!(
+            tx_len > 0,
+            "expected non-zero transmit length, got {tx_len}"
+        );
     }
 
     #[test]

@@ -53,8 +53,6 @@ pub use error::{LedStripError, LedStripResult};
 pub use frame::FrameBuf;
 pub use frame::FrameError;
 pub use pixel::{LedPixel, PixelKind, Rgb, Rgb16, Rgb16Order, RgbOrder, Rgbw, RgbwOrder};
-pub use protocol::{
-    BitOrder, PulseTiming, SingleWireProtocol, Sk6812, Ws2811, Ws2812B, Ws2816,
-};
+pub use protocol::{BitOrder, PulseTiming, SingleWireProtocol, Sk6812, Ws2811, Ws2812B, Ws2816};
 #[cfg(feature = "spi")]
 pub use spi::{SpiBackend, SpiCodec, SpiCodecPlanError, SpiEncodingPlan, TimingEdge};

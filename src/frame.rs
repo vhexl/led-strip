@@ -221,10 +221,7 @@ mod tests {
         frame
             .write(&[Rgb::new(1, 2, 3), Rgb::new(4, 5, 6)])
             .unwrap();
-        assert_eq!(
-            frame.as_slice(),
-            &[Rgb::new(1, 2, 3), Rgb::new(4, 5, 6)]
-        );
+        assert_eq!(frame.as_slice(), &[Rgb::new(1, 2, 3), Rgb::new(4, 5, 6)]);
     }
 
     #[test]
@@ -276,10 +273,7 @@ mod tests {
         let mut frame = FrameBuf::<Rgb, 4>::new(3).unwrap();
         frame.fill(Rgb::WHITE);
         frame.clear();
-        assert_eq!(
-            frame.as_slice(),
-            &[Rgb::BLACK, Rgb::BLACK, Rgb::BLACK]
-        );
+        assert_eq!(frame.as_slice(), &[Rgb::BLACK, Rgb::BLACK, Rgb::BLACK]);
     }
 
     // ── as_slice / as_mut_slice ──────────────────────────────────────
