@@ -40,10 +40,28 @@ jobs:
       - name: Run tests with coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 
+      - name: Verify lcov report
+        run: |
+          test -s lcov.info
+          grep -q '^SF:' lcov.info
+          grep -q '^DA:' lcov.info
+
+      - name: Normalize lcov paths for Codecov
+        run: |
+          sed -i "s#^SF:${GITHUB_WORKSPACE}/#SF:#" lcov.info
+          grep -q '^DA:' lcov.info
+          if grep -q "^SF:${GITHUB_WORKSPACE}/" lcov.info; then
+            echo "Found unresolved absolute SF paths in lcov.info"
+            exit 1
+          fi
+          echo "First SF entries after normalization:"
+          grep '^SF:' lcov.info | head -n 10
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
           files: ./lcov.info
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
           verbose: true
