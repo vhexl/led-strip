@@ -1,7 +1,9 @@
 # led-strip
 
-[![CI](https://github.com/visua/led-strip/workflows/CI/badge.svg)](https://github.com/visua/led-strip/actions)
-[![codecov](https://codecov.io/gh/visua/led-strip/branch/main/graph/badge.svg)](https://codecov.io/gh/visua/led-strip)
+English | [简体中文](README.zh-CN.md)
+
+[![CI](https://github.com/vhexl/led-strip/actions/workflows/ci.yml/badge.svg)](https://github.com/vhexl/led-strip/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/vhexl/led-strip/branch/main/graph/badge.svg)](https://codecov.io/gh/vhexl/led-strip)
 
 A `no_std` driver for single-wire addressable LED strips
 (WS2812B, SK6812, WS2811, WS2816) with compile-time buffer sizing
