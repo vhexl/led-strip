@@ -149,6 +149,10 @@ pub enum SpiCodecPlanError {
         pattern: u8,
         bits_per_symbol: u8,
     },
+    InvalidSymbolWaveform {
+        pattern: u8,
+        bits_per_symbol: u8,
+    },
     TimingOutOfTolerance {
         edge: TimingEdge,
         actual_ns: u32,
@@ -175,6 +179,13 @@ impl core::fmt::Display for SpiCodecPlanError {
                 f,
                 "invalid SPI plan: pattern=0x{pattern:02X} out of range for bits_per_symbol={bits_per_symbol}"
             ),
+            Self::InvalidSymbolWaveform {
+                pattern,
+                bits_per_symbol,
+            } => write!(
+                f,
+                "invalid SPI plan: pattern=0x{pattern:02X} must be contiguous high then contiguous low within bits_per_symbol={bits_per_symbol}"
+            ),
             Self::TimingOutOfTolerance {
                 edge,
                 actual_ns,
@@ -189,6 +200,38 @@ impl core::fmt::Display for SpiCodecPlanError {
 }
 
 impl core::error::Error for SpiCodecPlanError {}
+
+/// Rare encode-time failures that indicate an internal consistency bug.
+///
+/// `SpiCodec::encode` validates required capacity up front. If this error
+/// appears, `encoded_len` and hot-path writes have diverged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpiEncodeError {
+    InternalConsistency {
+        stage: &'static str,
+        required: usize,
+        capacity: usize,
+        attempted_len: usize,
+    },
+}
+
+impl core::fmt::Display for SpiEncodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InternalConsistency {
+                stage,
+                required,
+                capacity,
+                attempted_len,
+            } => write!(
+                f,
+                "internal consistency error at {stage}: encoded_len={required}, capacity={capacity}, attempted_len={attempted_len}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for SpiEncodeError {}
 
 /// SPI-based wire codec that encodes LED pixel data into a byte stream
 /// using configurable bit patterns (bit-banging over SPI MOSI).
@@ -297,7 +340,7 @@ where
     Proto: SingleWireProtocol<P>,
 {
     type Error = SpiCodecPlanError;
-    type EncodeError = core::convert::Infallible;
+    type EncodeError = SpiEncodeError;
 
     fn encoded_len(&self, config: &LedStripConfig<P, Proto>) -> usize {
         let Some(payload_bits) = config
@@ -368,6 +411,7 @@ where
                         out,
                         pattern,
                         self.plan.bits_per_symbol(),
+                        required,
                         &mut current_byte,
                         &mut used_bits,
                     )?;
@@ -380,20 +424,26 @@ where
                 current_byte |= u8::MAX >> used_bits;
             }
 
-            out.push(current_byte)
-                .map_err(|_| LedStripError::BufferTooSmall {
+            out.push(current_byte).map_err(|_| {
+                LedStripError::Operation(SpiEncodeError::InternalConsistency {
+                    stage: "final_partial_byte_push",
                     required,
                     capacity: TX_CAPACITY,
-                })?;
+                    attempted_len: out.len().saturating_add(1),
+                })
+            })?;
         }
 
         let reset_bytes = self.reset_bytes_for(config);
         let target_len = out.len().saturating_add(reset_bytes);
-        out.resize(target_len, self.reset_fill)
-            .map_err(|_| LedStripError::BufferTooSmall {
+        out.resize(target_len, self.reset_fill).map_err(|_| {
+            LedStripError::Operation(SpiEncodeError::InternalConsistency {
+                stage: "reset_tail_resize",
                 required,
                 capacity: TX_CAPACITY,
-            })?;
+                attempted_len: target_len,
+            })
+        })?;
 
         Ok(())
     }
@@ -489,6 +539,9 @@ fn validate_plan(plan: SpiEncodingPlan) -> Result<(), SpiCodecPlanError> {
         });
     }
 
+    simulate_symbol_phases(plan.zero_pattern, plan.bits_per_symbol)?;
+    simulate_symbol_phases(plan.one_pattern, plan.bits_per_symbol)?;
+
     Ok(())
 }
 
@@ -526,9 +579,10 @@ fn append_pattern<const TX_CAPACITY: usize>(
     out: &mut Vec<u8, TX_CAPACITY>,
     pattern: u8,
     bits_per_symbol: u8,
+    required: usize,
     current_byte: &mut u8,
     used_bits: &mut u8,
-) -> LedStripResult<(), core::convert::Infallible> {
+) -> LedStripResult<(), SpiEncodeError> {
     for shift in (0..bits_per_symbol).rev() {
         let bit = ((pattern >> shift) & 1) != 0;
 
@@ -538,11 +592,14 @@ fn append_pattern<const TX_CAPACITY: usize>(
 
         *used_bits += 1;
         if *used_bits == 8 {
-            out.push(*current_byte)
-                .map_err(|_| LedStripError::BufferTooSmall {
-                    required: TX_CAPACITY.saturating_add(1),
+            out.push(*current_byte).map_err(|_| {
+                LedStripError::Operation(SpiEncodeError::InternalConsistency {
+                    stage: "append_pattern_push",
+                    required,
                     capacity: TX_CAPACITY,
-                })?;
+                    attempted_len: out.len().saturating_add(1),
+                })
+            })?;
 
             *current_byte = 0;
             *used_bits = 0;
@@ -551,22 +608,48 @@ fn append_pattern<const TX_CAPACITY: usize>(
     Ok(())
 }
 
-/// Counts leading 1-bits from the MSB within the `bits_per_symbol` window.
+/// Simulates a symbol bit-by-bit and returns `(high_bits, low_bits)`.
 ///
-/// Assumes the pattern has the form `(1≥1)(0≥0)`. Non-consecutive patterns
-/// (e.g. `0b1010`) are under-counted — a limitation of the simple
-/// leading-ones heuristic. Use only with well-formed patterns like `0b100` or
-/// `0b1100` where 1-bits are contiguous from the MSB.
-fn leading_ones_in_symbol(pattern: u8, bits_per_symbol: u8) -> u8 {
-    let mut count = 0_u8;
-    for i in (0..bits_per_symbol).rev() {
-        if (pattern >> i) & 1 == 1 {
-            count += 1;
+/// Valid symbols are contiguous high followed by contiguous low with at least
+/// one bit in each phase.
+fn simulate_symbol_phases(pattern: u8, bits_per_symbol: u8) -> Result<(u8, u8), SpiCodecPlanError> {
+    let mut high_bits = 0_u8;
+    let mut low_bits = 0_u8;
+    let mut in_low_phase = false;
+
+    for shift in (0..bits_per_symbol).rev() {
+        let bit_is_high = ((pattern >> shift) & 1) != 0;
+
+        if !in_low_phase {
+            if bit_is_high {
+                high_bits += 1;
+            } else if high_bits == 0 {
+                return Err(SpiCodecPlanError::InvalidSymbolWaveform {
+                    pattern,
+                    bits_per_symbol,
+                });
+            } else {
+                in_low_phase = true;
+                low_bits = 1;
+            }
+        } else if bit_is_high {
+            return Err(SpiCodecPlanError::InvalidSymbolWaveform {
+                pattern,
+                bits_per_symbol,
+            });
         } else {
-            break;
+            low_bits += 1;
         }
     }
-    count
+
+    if high_bits == 0 || low_bits == 0 {
+        return Err(SpiCodecPlanError::InvalidSymbolWaveform {
+            pattern,
+            bits_per_symbol,
+        });
+    }
+
+    Ok((high_bits, low_bits))
 }
 
 /// Derives actual `T0H/T0L/T1H/T1L` from `plan` and compares against
@@ -575,8 +658,8 @@ fn leading_ones_in_symbol(pattern: u8, bits_per_symbol: u8) -> u8 {
 ///
 /// Timing derivation:
 ///   `spi_bit_ns = 10^9 / spi_hz`
-///   `T0H = leading_ones(zero_pattern) × spi_bit_ns`
-///   `T0L = (bits_per_symbol - T0H_bits) × spi_bit_ns`
+///   `T0H = simulated_high_bits(zero_pattern) × spi_bit_ns`
+///   `T0L = simulated_low_bits(zero_pattern) × spi_bit_ns`
 ///   … same for T1H/T1L.
 fn validate_timing<P, Proto>(plan: &SpiEncodingPlan) -> Result<(), SpiCodecPlanError>
 where
@@ -587,10 +670,8 @@ where
     let spi_bit_ns = 1_000_000_000_u32 / plan.spi_hz;
     let tolerance = Proto::TIMING_TOLERANCE_NS;
 
-    let zero_high = leading_ones_in_symbol(plan.zero_pattern, plan.bits_per_symbol);
-    let zero_low = plan.bits_per_symbol - zero_high;
-    let one_high = leading_ones_in_symbol(plan.one_pattern, plan.bits_per_symbol);
-    let one_low = plan.bits_per_symbol - one_high;
+    let (zero_high, zero_low) = simulate_symbol_phases(plan.zero_pattern, plan.bits_per_symbol)?;
+    let (one_high, one_low) = simulate_symbol_phases(plan.one_pattern, plan.bits_per_symbol)?;
 
     check_timing(
         u32::from(zero_high) * spi_bit_ns,
@@ -641,7 +722,7 @@ fn check_timing(
 mod tests {
     use crate::{Rgb, Rgb16, Rgbw, Sk6812, SpiBackend, TransportBackend, WireCodec, Ws2812B};
 
-    use super::{SpiCodec, SpiCodecPlanError, SpiEncodingPlan, TimingEdge};
+    use super::{SpiCodec, SpiCodecPlanError, SpiEncodeError, SpiEncodingPlan, TimingEdge};
 
     #[test]
     fn ws281x_3bit_passes_ws2812b_timing() {
@@ -718,6 +799,17 @@ mod tests {
         .to_string();
         assert!(s.contains("0xFF"), "{s}");
         assert!(s.contains("bits_per_symbol=3"), "{s}");
+    }
+
+    #[test]
+    fn plan_error_display_invalid_symbol_waveform() {
+        let s = SpiCodecPlanError::InvalidSymbolWaveform {
+            pattern: 0b101,
+            bits_per_symbol: 3,
+        }
+        .to_string();
+        assert!(s.contains("0x05"), "{s}");
+        assert!(s.contains("contiguous high then contiguous low"), "{s}");
     }
 
     #[test]
@@ -1076,5 +1168,45 @@ mod tests {
                 bits_per_symbol: 3,
             }
         ));
+    }
+
+    #[test]
+    fn validate_plan_rejects_non_contiguous_waveform() {
+        let plan = SpiEncodingPlan::new(2_400_000, 0b101, 0b110, 3);
+        let err = SpiCodec::new(plan, false).unwrap_err();
+        assert!(matches!(
+            err,
+            SpiCodecPlanError::InvalidSymbolWaveform {
+                pattern: 0b101,
+                bits_per_symbol: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_plan_rejects_low_leading_waveform() {
+        let plan = SpiEncodingPlan::new(2_400_000, 0b011, 0b110, 3);
+        let err = SpiCodec::new(plan, false).unwrap_err();
+        assert!(matches!(
+            err,
+            SpiCodecPlanError::InvalidSymbolWaveform {
+                pattern: 0b011,
+                bits_per_symbol: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn encode_error_display_internal_consistency() {
+        let s = SpiEncodeError::InternalConsistency {
+            stage: "append_pattern_push",
+            required: 64,
+            capacity: 64,
+            attempted_len: 65,
+        }
+        .to_string();
+        assert!(s.contains("internal consistency error"), "{s}");
+        assert!(s.contains("append_pattern_push"), "{s}");
+        assert!(s.contains("attempted_len=65"), "{s}");
     }
 }

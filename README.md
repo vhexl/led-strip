@@ -14,9 +14,10 @@ and zero heap allocations.
 - **SPI backend** via `embedded-hal` — the only fully implemented backend today
 - **RMT & PIO backends** — compile-time skeletons; full transmit/encode paths pending
 - Typed pixel formats: `Rgb` (8-bit), `Rgbw` (8-bit + white), `Rgb16` (16-bit)
-- Typed protocol presets: `Ws2812`, `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
+- Typed protocol presets: `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
 - Compile-time capacity checks in `LedStrip::new`; hot-path `refresh` never fails on sizing
-- SPI encoding plan validation at construction time (timing tolerance vs protocol spec)
+- SPI encoding plan validation at construction time (bit-by-bit symbol simulation + timing tolerance vs protocol spec)
+- Explicit `SpiEncodeError::InternalConsistency` for impossible post-check encode overflows
 - `invert_output` support for boards with external inverter circuits
 - Destructure with `into_parts()` to reuse backends across multiple strips
 
