@@ -1,0 +1,23 @@
+[package]
+name         = "led-strip"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.88"
+description  = "no_std driver for WS2812/SK6812/WS2811/WS2816 single-wire addressable LED strips"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/visua/led-strip"
+keywords     = ["led", "ws2812", "sk6812", "spi", "embedded", "no-std"]
+categories   = ["embedded", "no-std", "hardware-support"]
+readme       = "README.md"
+
+[dependencies]
+embedded-hal = { version = "1.0", optional = true }
+heapless     = "0.9"
+
+[features]
+default = ["spi"]
+spi     = ["dep:embedded-hal"]
+
+[package.metadata.docs.rs]
+features    = ["spi"]
+default-target = "x86_64-unknown-linux-gnu"
