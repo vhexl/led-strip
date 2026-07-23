@@ -108,8 +108,8 @@ where
     /// Encodes `pixels` into transport words, appending to `out`.
     ///
     /// The caller must ensure `out` has enough capacity (use [`encoded_len`](Self::encoded_len)).
-    /// The buffer is **not** cleared before encoding — callers that reuse a
-    /// buffer should call `out.clear()` first.
+    /// The buffer is cleared before encoding begins, so callers may safely reuse
+    /// a buffer across multiple `encode` calls without manual `out.clear()`.
     fn encode<const TX_CAPACITY: usize>(
         &self,
         config: &LedStripConfig<P, Proto>,
@@ -180,6 +180,14 @@ where
             });
         }
 
+        // Guard against silent overflow of frame_len_bytes() on narrow
+        // targets (e.g. 16-bit usize). In practice MAX_LEDS bounds this to
+        // safe values; this assertion catches logic errors in config construction.
+        debug_assert!(
+            config.frame_len_bytes() >= config.len() || config.is_empty(),
+            "frame_len_bytes overflow detected; reduce pixel count or use a 32-bit+ target"
+        );
+
         let required = codec.encoded_len(&config);
         if required > TX_CAPACITY {
             return Err(LedStripError::BufferTooSmall {
@@ -212,19 +220,30 @@ where
         &self.config
     }
 
-    pub fn set(
-        &mut self,
-        index: usize,
-        pixel: P,
-    ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
-        self.frame.set(index, pixel).map_err(lift_frame_error)
+    /// Returns the pixel at `index`, or `None` if out of bounds.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&P> {
+        self.frame.as_slice().get(index)
     }
 
-    pub fn write(
-        &mut self,
-        pixels: &[P],
-    ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
-        self.frame.write(pixels).map_err(lift_frame_error)
+    /// Sets the pixel at `index`.
+    ///
+    /// Returns [`LedStripError::InvalidIndex`] if `index` is out of bounds.
+    /// Does **not** produce codec or backend errors — those only occur in
+    /// [`refresh`](Self::refresh).
+    pub fn set(&mut self, index: usize, pixel: P) -> LedStripResult<(), Infallible> {
+        self.frame.set(index, pixel)?;
+        Ok(())
+    }
+
+    /// Bulk-overwrites all pixels from the given slice.
+    ///
+    /// The slice length must equal [`len`](Self::len). Returns
+    /// [`LedStripError::InvalidLength`] on mismatch. Does **not** produce
+    /// codec or backend errors.
+    pub fn write(&mut self, pixels: &[P]) -> LedStripResult<(), Infallible> {
+        self.frame.write(pixels)?;
+        Ok(())
     }
 
     pub fn fill(&mut self, pixel: P) {
@@ -296,16 +315,15 @@ where
     }
 }
 
-/// Lifts a `FrameError` into the structural variants of `LedStripError`.
+/// Lifts a `FrameError` into the structural variants of `LedStripError`
+/// with a wider `Operation` type parameter.
 ///
-/// Delegates to `From<FrameError> for LedStripError<Infallible>` then widens
-/// the `Operation` type parameter via [`convert`](LedStripError::convert).
-/// This avoids duplicating the three-branch mapping and ensures consistency
-/// with the `From` impl.
-///
-/// `FrameError` never carries operation-specific data, so `convert()` is
-/// guaranteed to only map structural variants — no `Operation` variant is ever
-/// constructed here.
+/// Uses `From<FrameError> for LedStripError<Infallible>` then widens via
+/// [`convert`](LedStripError::convert). Not used on the main `set`/`write`
+/// path (which uses `?` to convert to `LedStripError<Infallible>`), but
+/// remains available for codec/backend impls that need to propagate frame
+/// errors into a `RefreshError`-wrapped result.
+#[allow(dead_code)]
 fn lift_frame_error<CE, BE>(e: FrameError) -> LedStripError<RefreshError<CE, BE>> {
     LedStripError::from(e).convert()
 }

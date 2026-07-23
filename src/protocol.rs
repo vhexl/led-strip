@@ -1,5 +1,18 @@
 use crate::pixel::{LedPixel, Rgb, Rgb16, Rgb16Order, RgbOrder, Rgbw, RgbwOrder};
 
+/// Sealed trait — prevents external crates from implementing `SingleWireProtocol`.
+/// New protocol markers must be added in `protocol.rs` alongside the `<pixel, protocol>` impl matrix.
+mod private {
+    use super::{Sk6812, Ws2811, Ws2812B, Ws2816};
+
+    pub trait ProtocolSealed {}
+
+    impl ProtocolSealed for Ws2812B {}
+    impl ProtocolSealed for Ws2811 {}
+    impl ProtocolSealed for Sk6812 {}
+    impl ProtocolSealed for Ws2816 {}
+}
+
 /// Bit transmission order within a byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitOrder {
@@ -32,7 +45,7 @@ pub struct PulseTiming {
 ///   Each edge must satisfy `|actual − expected| ≤ TIMING_TOLERANCE_NS`.
 ///   Defaults to 150 ns (WS2812B-class datasheet typical). Override for stricter
 ///   or looser protocols.
-pub trait SingleWireProtocol<P>
+pub trait SingleWireProtocol<P>: private::ProtocolSealed
 where
     P: LedPixel,
 {
