@@ -17,6 +17,7 @@ WS2812B、SK6812、WS2811、WS2816，具备编译期缓冲区容量约束，
 - 类型化协议预设：`Ws2812`、`Ws2812B`、`Ws2811`、`Sk6812`、`Ws2816`
 - 在 `LedStrip::new` 中进行编译期容量边界相关校验；热路径 `refresh` 不再因容量不足失败
 - 在构造期执行 SPI 编码方案校验（时序容差对照协议规范）
+- `SpiEncodeError::InternalConsistency`：防止编码后溢出（正常逻辑下不会触发）
 - 支持 `invert_output`，适配带外部反相器的硬件板卡
 - 通过 `into_parts()` 解构组件，便于复用后端实例
 
@@ -37,6 +38,17 @@ let mut strip = MyStrip::new(config, codec, backend).unwrap();
 strip.fill(Rgb::new(255, 0, 0));
 strip.refresh().unwrap();
 ```
+
+## 发布流程
+
+本项目使用 [release-plz](https://release-plz.dev/) 自动化发布：
+
+1. 每次推送到 `main` 分支，release-plz 会自动创建/更新一个 **Release PR**，
+   包含版本号与基于 [约定式提交](https://www.conventionalcommits.org/) 生成的更新日志。
+2. 合并 Release PR 后，release-plz 将自动：
+   - 创建 git 标签（`led-strip-v<version>`）
+   - 发布到 [crates.io](https://crates.io/crates/led-strip)
+   - 创建 GitHub Release 及发布说明
 
 ## 许可证
 

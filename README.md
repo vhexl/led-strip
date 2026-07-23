@@ -14,7 +14,7 @@ and zero heap allocations.
 - **SPI backend** via `embedded-hal` — the only fully implemented backend today
 - **RMT & PIO backends** — compile-time skeletons; full transmit/encode paths pending
 - Typed pixel formats: `Rgb` (8-bit), `Rgbw` (8-bit + white), `Rgb16` (16-bit)
-- Typed protocol presets: `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
+- Typed protocol presets: `Ws2812`, `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
 - Compile-time capacity checks in `LedStrip::new`; hot-path `refresh` never fails on sizing
 - SPI encoding plan validation at construction time (bit-by-bit symbol simulation + timing tolerance vs protocol spec)
 - Explicit `SpiEncodeError::InternalConsistency` for impossible post-check encode overflows
@@ -38,6 +38,18 @@ let mut strip = MyStrip::new(config, codec, backend).unwrap();
 strip.fill(Rgb::new(255, 0, 0));
 strip.refresh().unwrap();
 ```
+
+## Releasing
+
+This project uses [release-plz](https://release-plz.dev/) to automate releases:
+
+1. Every push to `main` triggers release-plz to open/update a **Release PR**
+   with the correct version bumps and a changelog derived from
+   [Conventional Commits](https://www.conventionalcommits.org/).
+2. Merge the Release PR when ready — release-plz will then:
+   - Create the git tag (`led-strip-v<version>`)
+   - Publish to [crates.io](https://crates.io/crates/led-strip)
+   - Create a GitHub release with release notes
 
 ## License
 
