@@ -7,6 +7,7 @@ use crate::{LedPixel, LedStripConfig, SingleWireProtocol};
 /// Separated from [`crate::LedStripError`] so `FrameBuf` does not carry a phantom
 /// `Operation` type parameter that is never constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// Pixel index out of range.
     InvalidIndex,

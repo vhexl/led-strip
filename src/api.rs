@@ -3,8 +3,7 @@ use core::convert::Infallible;
 use heapless::Vec;
 
 use crate::{
-    FrameBuf, FrameError, LedPixel, LedStripConfig, LedStripError, LedStripResult,
-    SingleWireProtocol,
+    FrameBuf, LedPixel, LedStripConfig, LedStripError, LedStripResult, SingleWireProtocol,
 };
 
 /// Unified error type returned by [`LedStrip::refresh`] and [`LedStrip::clear`].
@@ -13,6 +12,7 @@ use crate::{
 /// error (transmission failure), so callers see a single error shape
 /// regardless of which layer failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RefreshError<CodecError, BackendError> {
     /// The codec failed to encode the frame into transport words.
     Codec(CodecError),
@@ -50,8 +50,7 @@ where
 ///
 /// A backend owns a hardware peripheral (SPI bus, or a future peripheral such
 /// as an RMT channel or PIO state machine) and knows how to push pre-encoded
-/// words onto the wire. It does **not** understand LED protocol timings —
-/// that is the codec's job.
+/// words onto the wire. It does **not** understand LED protocol timings —/// that is the codec's job.
 ///
 /// # Implementing
 ///
@@ -76,7 +75,7 @@ pub trait TransportBackend {
 /// pixel bytes into the word stream that a [`TransportBackend`] can transmit.
 ///
 /// The generic parameters lock a `<pixel, protocol, codec>` triple at compile
-/// time — you cannot accidentally drive SK6812 pixels with a WS2812B encoding plan.
+/// time —you cannot accidentally drive SK6812 pixels with a WS2812B encoding plan.
 ///
 /// # Implementing
 ///
@@ -96,7 +95,7 @@ where
     /// Error type produced specifically by [`encode`](Self::encode).
     ///
     /// Separated from [`Error`](Self::Error) because some codecs (e.g.
-    /// [`SpiCodec`](crate::SpiCodec)) never fail during encoding — the
+    /// [`SpiCodec`](crate::SpiCodec)) never fail during encoding —the
     /// only possible errors are structural (`InvalidLength`,
     /// `BufferTooSmall`).
     type EncodeError;
@@ -121,7 +120,7 @@ where
 /// High-level driver for a single-wire addressable LED strip.
 ///
 /// Owns the configuration, frame buffer, codec, and transport backend.
-/// This is the primary API entry point — construct one, then call
+/// This is the primary API entry point —construct one, then call
 /// [`set`](Self::set) / [`write`](Self::write) / [`fill`](Self::fill) to
 /// update pixels and [`refresh`](Self::refresh) to push the frame to the strip.
 ///
@@ -165,7 +164,7 @@ where
 {
     /// Constructs the driver and validates all capacity constraints once.
     ///
-    /// Capacity errors (`BufferTooSmall`) are only returned here — once `new`
+    /// Capacity errors (`BufferTooSmall`) are only returned here —once `new`
     /// succeeds, `refresh`/`set`/`write`/`clear` will never report capacity
     /// failures on the hot path.
     pub fn new(
@@ -229,7 +228,7 @@ where
     /// Sets the pixel at `index`.
     ///
     /// Returns [`LedStripError::InvalidIndex`] if `index` is out of bounds.
-    /// Does **not** produce codec or backend errors — those only occur in
+    /// Does **not** produce codec or backend errors —those only occur in
     /// [`refresh`](Self::refresh).
     pub fn set(&mut self, index: usize, pixel: P) -> LedStripResult<(), Infallible> {
         self.frame.set(index, pixel)?;
@@ -259,20 +258,7 @@ where
     ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
         self.codec
             .encode(&self.config, self.frame.as_slice(), &mut self.tx_buf)
-            // Lift structural errors to top-level; wrap codec-specific errors
-            // into `RefreshError::Codec` so the caller sees a unified error shape.
-            .map_err(|error| match error {
-                LedStripError::InvalidIndex => LedStripError::InvalidIndex,
-                LedStripError::InvalidLength { expected, actual } => {
-                    LedStripError::InvalidLength { expected, actual }
-                }
-                LedStripError::BufferTooSmall { required, capacity } => {
-                    LedStripError::BufferTooSmall { required, capacity }
-                }
-                LedStripError::Operation(error) => {
-                    LedStripError::Operation(RefreshError::Codec(error))
-                }
-            })?;
+            .map_err(|e| e.map_operation(RefreshError::Codec))?;
 
         self.backend
             .transmit(self.tx_buf.as_slice())
@@ -313,19 +299,6 @@ where
             .field("tx_buf", &self.tx_buf)
             .finish()
     }
-}
-
-/// Lifts a `FrameError` into the structural variants of `LedStripError`
-/// with a wider `Operation` type parameter.
-///
-/// Uses `From<FrameError> for LedStripError<Infallible>` then widens via
-/// [`convert`](LedStripError::convert). Not used on the main `set`/`write`
-/// path (which uses `?` to convert to `LedStripError<Infallible>`), but
-/// remains available for codec/backend impls that need to propagate frame
-/// errors into a `RefreshError`-wrapped result.
-#[allow(dead_code)]
-fn lift_frame_error<CE, BE>(e: FrameError) -> LedStripError<RefreshError<CE, BE>> {
-    LedStripError::from(e).convert()
 }
 
 #[cfg(test)]
@@ -409,10 +382,10 @@ mod tests {
         }
     }
 
-    type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec, MockBackend, 16, 256>;
+    type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 16, 256>;
 
-    fn make_codec() -> SpiCodec {
-        SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap()
+    fn make_codec() -> SpiCodec<Rgb, Ws2812B> {
+        SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap()
     }
 
     fn make_strip(len: usize) -> TestStrip {
@@ -450,8 +423,8 @@ mod tests {
 
     #[test]
     fn new_rejects_tx_capacity_overflow() {
-        // 6 pixels × 9 payload bytes + reset ≈ 69 bytes, but TX_CAPACITY = 5
-        type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec, MockBackend, 16, 5>;
+        // 6 pixels × 9 payload bytes + reset —69 bytes, but TX_CAPACITY = 5
+        type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 16, 5>;
         let config = LedStripConfig::ws2812b(6);
         let err = TinyStrip::new(config, make_codec(), MockBackend::new()).unwrap_err();
         assert!(matches!(err, LedStripError::BufferTooSmall { .. }));
@@ -467,9 +440,7 @@ mod tests {
     fn set_updates_pixel() {
         let mut strip = make_strip(4);
         strip.set(1, Rgb::new(10, 20, 30)).unwrap();
-        // refresh to verify the pixel was actually set
-        strip.refresh().unwrap();
-        assert!(strip.backend.last_tx_len() > 0);
+        assert_eq!(strip.get(1), Some(&Rgb::new(10, 20, 30)));
     }
 
     #[test]
@@ -518,7 +489,7 @@ mod tests {
         let mut strip = make_strip(2);
         strip.refresh().unwrap();
         let tx_len = strip.backend.last_tx_len();
-        // 2 pixels × 9 bytes + reset → should be non-zero
+        // 2 pixels × 9 bytes + reset —should be non-zero
         assert!(
             tx_len > 0,
             "expected non-zero transmit length, got {tx_len}"
@@ -561,26 +532,19 @@ mod tests {
         assert!(s.contains("tx_buf"), "{s}");
     }
 
-    // ── lift_frame_error ────────────────────────────────────────────
+    // ── map_operation ───────────────────────────────────────────────
 
     #[test]
-    fn lift_frame_error_maps_invalid_index() {
-        let err = lift_frame_error::<(), ()>(crate::FrameError::InvalidIndex);
-        assert_eq!(err, LedStripError::InvalidIndex);
+    fn map_operation_preserves_structural_variants() {
+        let e: LedStripError<core::convert::Infallible> = LedStripError::InvalidIndex;
+        let mapped: LedStripError<&str> = e.map_operation(|_| unreachable!());
+        assert_eq!(mapped, LedStripError::InvalidIndex);
     }
 
     #[test]
-    fn lift_frame_error_maps_invalid_length() {
-        let err = lift_frame_error::<(), ()>(crate::FrameError::InvalidLength {
-            expected: 10,
-            actual: 5,
-        });
-        assert_eq!(
-            err,
-            LedStripError::InvalidLength {
-                expected: 10,
-                actual: 5,
-            }
-        );
+    fn map_operation_wraps_operation_variant() {
+        let e: LedStripError<&str> = LedStripError::Operation("inner");
+        let mapped: LedStripError<usize> = e.map_operation(|s| s.len());
+        assert_eq!(mapped, LedStripError::Operation(5));
     }
 }

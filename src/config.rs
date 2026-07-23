@@ -63,9 +63,14 @@ where
         P::BYTES_PER_PIXEL
     }
 
+    /// Returns `usize::MAX` on overflow so capacity checks in `LedStrip::new`
+    /// will reject the configuration rather than silently wrapping on narrow targets.
     #[must_use]
     pub const fn frame_len_bytes(&self) -> usize {
-        self.len * P::BYTES_PER_PIXEL
+        match self.len.checked_mul(P::BYTES_PER_PIXEL) {
+            Some(v) => v,
+            None => usize::MAX,
+        }
     }
 
     #[must_use]

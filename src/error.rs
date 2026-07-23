@@ -6,6 +6,7 @@ use crate::frame::FrameError;
 /// fourth (`Operation`) wraps backend- or codec-specific errors via the
 /// generic `E` parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LedStripError<E> {
     /// Pixel index out of range.
     InvalidIndex,
@@ -63,6 +64,28 @@ impl<E: core::error::Error + 'static> core::error::Error for LedStripError<E> {
         match self {
             Self::Operation(inner) => Some(inner),
             _ => None,
+        }
+    }
+}
+
+impl<E> LedStripError<E> {
+    /// Maps the `Operation` variant's error type via `f`, leaving structural
+    /// variants unchanged.  Useful for wrapping codec/backend errors into a
+    /// unified [`RefreshError`](crate::RefreshError) without enumerating every
+    /// structural variant by hand.
+    pub fn map_operation<F, E2>(self, f: F) -> LedStripError<E2>
+    where
+        F: FnOnce(E) -> E2,
+    {
+        match self {
+            Self::InvalidIndex => LedStripError::InvalidIndex,
+            Self::InvalidLength { expected, actual } => {
+                LedStripError::InvalidLength { expected, actual }
+            }
+            Self::BufferTooSmall { required, capacity } => {
+                LedStripError::BufferTooSmall { required, capacity }
+            }
+            Self::Operation(e) => LedStripError::Operation(f(e)),
         }
     }
 }

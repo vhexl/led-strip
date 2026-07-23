@@ -3,9 +3,9 @@
 //! # Architecture
 //!
 //! ```text
-//! LedStrip ──► WireCodec (pixels → transport words) ──► TransportBackend (transmit)
-//!                 │                                         │
-//!                 └─ SpiCodec (SPI bit-banging)              └─ SpiBackend (SPI)
+//! LedStrip --> WireCodec (pixels => transport words) --> TransportBackend (transmit)
+//!                |                                        |
+//!                +-- SpiCodec (SPI bit-banging)            +-- SpiBackend (SPI)
 //! ```
 //!
 //! The [`WireCodec`] / [`TransportBackend`] traits are intentionally generic:
@@ -17,7 +17,7 @@
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
-//! | `spi`   | ✅      | SPI backend, requires `embedded-hal` |
+//! | `spi`   | Yes     | SPI backend, requires `embedded-hal` |
 //!
 //! # Quick start
 //!
@@ -25,8 +25,8 @@
 //! use led_strip::{LedStrip, LedStripConfig, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, Ws2812B};
 //!
 //! let config = LedStripConfig::ws2812b(60);
-//! let codec = SpiCodec::for_protocol::<Rgb, Ws2812B>(
-//!     SpiEncodingPlan::ws281x_3bit(), false
+//! let codec = SpiCodec::<Rgb, Ws2812B>::for_protocol(
+//!     SpiEncodingPlan::ws2812_3bit(), false
 //! )?;
 //! let backend = SpiBackend::new(spi_peripheral);
 //! let mut strip: LedStrip<Rgb, Ws2812B, _, _, 64, 256> =

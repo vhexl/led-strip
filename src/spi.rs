@@ -1,3 +1,5 @@
+use core::marker::PhantomData;
+
 use embedded_hal::spi::SpiBus;
 use heapless::Vec;
 
@@ -12,8 +14,8 @@ use crate::{
 /// Each protocol bit is encoded as `bits_per_symbol` SPI bits (typically 3 or 4).
 /// For example, WS2812B uses 3-bit symbols: `0b100` for logical 0, `0b110` for logical 1.
 ///
-/// Use the predefined constructors ([`ws281x_3bit`](Self::ws281x_3bit),
-/// [`sk6812_4bit`](Self::sk6812_4bit)) or build a custom plan with
+/// Use the predefined constructors ([`ws2812_3bit`](Self::ws2812_3bit),
+/// [`sk6812_4bit`](Self::sk6812_4bit), [`ws2811_8bit`](Self::ws2811_8bit)) or build a custom plan with
 /// [`new`](Self::new).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpiEncodingPlan {
@@ -47,31 +49,45 @@ impl SpiEncodingPlan {
 
     /// 3-bit SPI plan at 2.4 MHz for WS2812 / WS2812B.
     ///
-    /// Derived timing (spi_bit ≈ 416 ns, tolerance ±150 ns per WS2812B datasheet V1):
-    /// - T0H ≈ 416 ns (expected 400 ns, Δ = 16 ns ✓)
-    /// - T0L ≈ 833 ns (expected 850 ns, Δ = 17 ns ✓)
-    /// - T1H ≈ 833 ns (expected 800 ns, Δ = 33 ns ✓)
-    /// - T1L ≈ 416 ns (expected 450 ns, Δ = 34 ns ✓)
+    /// Derived timing (spi_bit ~ 416 ns, tolerance +/-150 ns per WS2812B datasheet V1):
+    /// - T0H ~ 416 ns (expected 400 ns, delta = 16 ns OK)
+    /// - T0L ~ 833 ns (expected 850 ns, delta = 17 ns OK)
+    /// - T1H ~ 833 ns (expected 800 ns, delta = 33 ns OK)
+    /// - T1L ~ 416 ns (expected 450 ns, delta = 34 ns OK)
     ///
     /// TX bytes per pixel: 3 ch × 8 bits × 3 SPI bits / 8 = 9 bytes.
     #[must_use]
-    pub const fn ws281x_3bit() -> Self {
+    pub const fn ws2812_3bit() -> Self {
         Self::new(2_400_000, 0b100, 0b110, 3)
     }
 
     /// 4-bit SPI plan at 3.2 MHz for SK6812.
     ///
-    /// Derived timing (spi_bit ≈ 312 ns, tolerance ±150 ns per SK6812 datasheet):
-    /// - T0H ≈ 312 ns (expected 300 ns, Δ = 12 ns ✓)
-    /// - T0L ≈ 937 ns (expected 900 ns, Δ = 37 ns ✓)
-    /// - T1H ≈ 625 ns (expected 600 ns, Δ = 25 ns ✓)
-    /// - T1L ≈ 625 ns (expected 600 ns, Δ = 25 ns ✓)
+    /// Derived timing (spi_bit ~ 312 ns, tolerance +/-150 ns per SK6812 datasheet):
+    /// - T0H ~ 312 ns (expected 300 ns, delta = 12 ns OK)
+    /// - T0L ~ 937 ns (expected 900 ns, delta = 37 ns OK)
+    /// - T1H ~ 625 ns (expected 600 ns, delta = 25 ns OK)
+    /// - T1L ~ 625 ns (expected 600 ns, delta = 25 ns OK)
     ///
     /// TX bytes per pixel: 4 ch × 8 bits × 4 SPI bits / 8 = 16 bytes.
-    /// Note: bits_per_symbol = 4; size TX_CAPACITY accordingly (larger than ws281x_3bit).
+    /// Note: bits_per_symbol = 4; size TX_CAPACITY accordingly (larger than ws2812_3bit).
     #[must_use]
     pub const fn sk6812_4bit() -> Self {
         Self::new(3_200_000, 0b1000, 0b1100, 4)
+    }
+
+    /// 8-bit SPI plan at 3.2 MHz for WS2811 (400 kbps slow mode).
+    ///
+    /// Derived timing (spi_bit ~ 312 ns, tolerance +/-150 ns):
+    /// - T0H ~ 624 ns (expected 500 ns, delta = 124 ns OK)
+    /// - T0L ~ 1872 ns (expected 2000 ns, delta = 128 ns OK)
+    /// - T1H ~ 1248 ns (expected 1200 ns, delta = 48 ns OK)
+    /// - T1L ~ 1248 ns (expected 1300 ns, delta = 52 ns OK)
+    ///
+    /// TX bytes per pixel: 3 ch × 8 bits × 8 SPI bits / 8 = 24 bytes.
+    #[must_use]
+    pub const fn ws2811_8bit() -> Self {
+        Self::new(3_200_000, 0b1100_0000, 0b1111_0000, 8)
     }
 
     /// Appends extra reset time for external signal conditioning.
@@ -139,6 +155,7 @@ impl core::fmt::Display for TimingEdge {
 /// Errors returned when constructing a [`SpiCodec`] or validating an
 /// [`SpiEncodingPlan`] against a protocol's timing tolerances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpiCodecPlanError {
     ZeroClock,
     ZeroBitsPerSymbol,
@@ -206,6 +223,7 @@ impl core::error::Error for SpiCodecPlanError {}
 /// `SpiCodec::encode` validates required capacity up front. If this error
 /// appears, `encoded_len` and hot-path writes have diverged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpiEncodeError {
     InternalConsistency {
         stage: &'static str,
@@ -238,8 +256,18 @@ impl core::error::Error for SpiEncodeError {}
 ///
 /// Pre-computes inverted/normal patterns and reset fill bytes at construction
 /// time so the hot encoding path is branch-free.
+///
+/// The type parameters `P` and `Proto` tie the codec to a specific
+/// `<pixel, protocol>` pair at compile time —a codec built via
+/// [`SpiCodec::<Rgb, Ws2812B>::for_protocol`](Self::for_protocol) cannot
+/// be used with a [`LedStrip`](crate::LedStrip) parameterized on a different
+/// protocol, even if both happen to implement the same [`WireCodec`](crate::WireCodec) trait.
 #[derive(Debug)]
-pub struct SpiCodec {
+pub struct SpiCodec<P, Proto>
+where
+    P: LedPixel,
+    Proto: SingleWireProtocol<P>,
+{
     plan: SpiEncodingPlan,
     /// Zero-bit pattern, pre-inverted if `invert_output` was set at construction.
     zero_pattern: u8,
@@ -247,9 +275,14 @@ pub struct SpiCodec {
     one_pattern: u8,
     /// Reset fill byte: 0x00 for normal, 0xFF for inverted output.
     reset_fill: u8,
+    _marker: PhantomData<(P, Proto)>,
 }
 
-impl SpiCodec {
+impl<P, Proto> SpiCodec<P, Proto>
+where
+    P: LedPixel,
+    Proto: SingleWireProtocol<P>,
+{
     /// Constructs a codec from a plan. Validates the plan's structural
     /// parameters (clock, symbol width, pattern range) but does **not**
     /// check protocol timing. Use [`for_protocol`](Self::for_protocol) if
@@ -266,14 +299,10 @@ impl SpiCodec {
     /// Returns [`SpiCodecPlanError::TimingOutOfTolerance`] if any of the four timing edges
     /// (T0H, T0L, T1H, T1L) exceeds `Proto::TIMING_TOLERANCE_NS`.
     #[must_use = "returns Err on timing violations; use new() to skip timing validation"]
-    pub fn for_protocol<P, Proto>(
+    pub fn for_protocol(
         plan: SpiEncodingPlan,
         invert_output: bool,
-    ) -> Result<Self, SpiCodecPlanError>
-    where
-        P: LedPixel,
-        Proto: SingleWireProtocol<P>,
-    {
+    ) -> Result<Self, SpiCodecPlanError> {
         validate_plan(plan)?;
         validate_timing::<P, Proto>(&plan)?;
         Ok(Self::from_plan(plan, invert_output))
@@ -282,7 +311,7 @@ impl SpiCodec {
     /// Pre-computes inverted/normal patterns and reset fill based on `invert_output`.
     ///
     /// When `invert_output` is true, each pattern bit is flipped within the
-    /// `bits_per_symbol`-wide mask window (e.g. 0b100 → 0b011 for 3-bit SPI).
+    /// `bits_per_symbol`-wide mask window (e.g. 0b100 —0b011 for 3-bit SPI).
     const fn from_plan(plan: SpiEncodingPlan, invert_output: bool) -> Self {
         if invert_output {
             let mask = pattern_mask(plan.bits_per_symbol());
@@ -291,6 +320,7 @@ impl SpiCodec {
                 one_pattern: (!plan.one_pattern()) & mask,
                 reset_fill: u8::MAX,
                 plan,
+                _marker: PhantomData,
             }
         } else {
             Self {
@@ -298,6 +328,7 @@ impl SpiCodec {
                 one_pattern: plan.one_pattern(),
                 reset_fill: 0,
                 plan,
+                _marker: PhantomData,
             }
         }
     }
@@ -311,7 +342,7 @@ impl SpiCodec {
     /// `Proto::RESET_NS + extra_reset_ns` at the current SPI clock rate.
     ///
     /// Uses ceiling division: `ceil(ns * spi_hz / 1e9)`.
-    fn reset_bytes_for<P, Proto>(&self, config: &LedStripConfig<P, Proto>) -> usize
+    fn reset_bytes_for(&self, config: &LedStripConfig<P, Proto>) -> usize
     where
         P: LedPixel,
         Proto: SingleWireProtocol<P>,
@@ -320,7 +351,7 @@ impl SpiCodec {
 
         // Fixed-point arithmetic: reset_ns × spi_hz gives scaled clock cycles
         // (in units of 10^9); dividing by 8 × 10^9 converts to SPI bytes in
-        // one step (cycles → seconds → bytes).
+        // one step (cycles —seconds —bytes).
         let Some(scaled_cycles) = total_reset_ns.checked_mul(u64::from(self.plan.spi_hz)) else {
             // Overflow only at physically impossible parameters
             // (multi-second reset at GHz clocks). Return a value that will
@@ -334,7 +365,7 @@ impl SpiCodec {
     }
 }
 
-impl<P, Proto> WireCodec<P, Proto, u8> for SpiCodec
+impl<P, Proto> WireCodec<P, Proto, u8> for SpiCodec<P, Proto>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
@@ -348,7 +379,7 @@ where
             .checked_mul(8)
             .and_then(|v| v.checked_mul(usize::from(self.plan.bits_per_symbol)))
         else {
-            // Overflow → return a value that will fail the capacity check in `new()`.
+            // Overflow —return a value that will fail the capacity check in `new()`.
             // In practice this path is unreachable on 32-bit+ platforms for any real
             // LED strip (would require billions of pixels).
             return usize::MAX;
@@ -358,7 +389,7 @@ where
         let total = payload_bytes.saturating_add(self.reset_bytes_for(config));
 
         // Saturating arithmetic on a 32-bit (or wider) usize only triggers at
-        // millions of LEDs — far beyond any real strip.  Still, if it ever
+        // millions of LEDs —far beyond any real strip.  Still, if it ever
         // saturates, the capacity check above would silently pass.
         debug_assert!(
             total < usize::MAX / 2,
@@ -419,6 +450,11 @@ where
             }
         }
 
+        // Defensive: flush any partial byte. In practice this branch is
+        // unreachable for all valid configurations because the total SPI
+        // bit count (frame_bytes × 8 × bits_per_symbol) is always a multiple
+        // of 8. The inversion fill (`u8::MAX >> used_bits`) is likewise
+        // never exercised by a real encoding path.
         if used_bits != 0 {
             if self.reset_fill != 0 {
                 current_byte |= u8::MAX >> used_bits;
@@ -493,7 +529,8 @@ where
     type Error = SPI::Error;
 
     fn transmit(&mut self, words: &[Self::Word]) -> Result<(), Self::Error> {
-        self.spi.write(words)
+        self.spi.write(words)?;
+        self.spi.flush()
     }
 }
 
@@ -548,8 +585,8 @@ fn validate_plan(plan: SpiEncodingPlan) -> Result<(), SpiCodecPlanError> {
 /// Returns the bit position within a pixel byte for the given logical bit index,
 /// respecting the protocol's `BIT_ORDER`.
 ///
-/// With `MsbFirst`, bit 0 → position 7, bit 1 → position 6, …
-/// With `LsbFirst`, bit 0 → position 0, bit 1 → position 1, …
+/// With `MsbFirst`, bit 0 -> position 7, bit 1 -> position 6, ...
+/// With `LsbFirst`, bit 0 -> position 0, bit 1 -> position 1, ...
 fn bit_shift<P, Proto>(bit_index: u8) -> u8
 where
     P: LedPixel,
@@ -572,7 +609,7 @@ where
 ///
 /// This is the hot path during `refresh`. The capacity check was already
 /// performed at the top of `encode()`, so push failures here indicate a
-/// logic error in `encoded_len` — the error path is cold but provides a
+/// logic error in `encoded_len` —the error path is cold but provides a
 /// safe panic-free fallback instead of UB.
 #[inline]
 fn append_pattern<const TX_CAPACITY: usize>(
@@ -654,20 +691,22 @@ fn simulate_symbol_phases(pattern: u8, bits_per_symbol: u8) -> Result<(u8, u8), 
 
 /// Derives actual `T0H/T0L/T1H/T1L` from `plan` and compares against
 /// `Proto::ZERO/ONE` using the symmetric `TIMING_TOLERANCE_NS` band.
-/// Each edge must satisfy `|actual − expected| ≤ tolerance`.
+/// Each edge must satisfy `|actual —expected| —tolerance`.
 ///
 /// Timing derivation:
 ///   `spi_bit_ns = 10^9 / spi_hz`
 ///   `T0H = simulated_high_bits(zero_pattern) × spi_bit_ns`
 ///   `T0L = simulated_low_bits(zero_pattern) × spi_bit_ns`
-///   … same for T1H/T1L.
+///   —same for T1H/T1L.
 fn validate_timing<P, Proto>(plan: &SpiEncodingPlan) -> Result<(), SpiCodecPlanError>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
 {
     // Integer division is safe: validate_plan already ensures spi_hz != 0.
-    let spi_bit_ns = 1_000_000_000_u32 / plan.spi_hz;
+    // Round to nearest rather than truncating so that timing values that are
+    // slightly below the next integer are correctly represented (max error < 0.5 ns).
+    let spi_bit_ns = (1_000_000_000_u32 + plan.spi_hz / 2) / plan.spi_hz;
     let tolerance = Proto::TIMING_TOLERANCE_NS;
 
     let (zero_high, zero_low) = simulate_symbol_phases(plan.zero_pattern, plan.bits_per_symbol)?;
@@ -720,24 +759,26 @@ fn check_timing(
 
 #[cfg(test)]
 mod tests {
-    use crate::{Rgb, Rgb16, Rgbw, Sk6812, SpiBackend, TransportBackend, WireCodec, Ws2812B};
+    use crate::{
+        Rgb, Rgb16, Rgbw, Sk6812, SpiBackend, TransportBackend, WireCodec, Ws2811, Ws2812B,
+    };
 
     use super::{SpiCodec, SpiCodecPlanError, SpiEncodeError, SpiEncodingPlan, TimingEdge};
 
     #[test]
-    fn ws281x_3bit_passes_ws2812b_timing() {
-        SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+    fn ws2812_3bit_passes_ws2812b_timing() {
+        SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
     }
 
     #[test]
     fn sk6812_4bit_passes_sk6812_timing() {
-        SpiCodec::for_protocol::<Rgbw, Sk6812>(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
+        SpiCodec::<Rgbw, Sk6812>::for_protocol(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
     }
 
     #[test]
-    fn ws281x_3bit_rejects_sk6812_timing() {
-        // T1H: actual ≈ 832 ns, expected = 600 ns, Δ = 232 ns > 150 ns tolerance.
-        let err = SpiCodec::for_protocol::<Rgbw, Sk6812>(SpiEncodingPlan::ws281x_3bit(), false)
+    fn ws2812_3bit_rejects_sk6812_timing() {
+        // T1H: actual —832 ns, expected = 600 ns, Δ = 232 ns > 150 ns tolerance.
+        let err = SpiCodec::<Rgbw, Sk6812>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false)
             .unwrap_err();
         assert!(matches!(
             err,
@@ -752,7 +793,7 @@ mod tests {
     fn out_of_tolerance_plan_reports_first_failing_edge() {
         // 1 MHz 3-bit: spi_bit = 1000 ns, T0H = 1000 ns vs WS2812B T0H = 400 ns, Δ = 600 ns.
         let plan = SpiEncodingPlan::new(1_000_000, 0b100, 0b110, 3);
-        let err = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap_err();
         assert_eq!(
             err,
             SpiCodecPlanError::TimingOutOfTolerance {
@@ -840,7 +881,7 @@ mod tests {
     #[test]
     fn encode_produces_nonempty_buffer() {
         let codec =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
         let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::new(0, 255, 0)];
         let mut out: HVec<u8, 64> = HVec::new();
@@ -848,14 +889,14 @@ mod tests {
         codec.encode(&config, &pixels, &mut out).unwrap();
 
         assert!(!out.is_empty(), "encoded output should not be empty");
-        // ws281x_3bit: 3 ch × 8 bits × 3 spi_bits / 8 = 9 payload bytes + reset
+        // ws2812_3bit: 3 ch × 8 bits × 3 spi_bits / 8 = 9 payload bytes + reset
         assert!(out.len() >= 9, "expected >=9 bytes, got {}", out.len());
     }
 
     #[test]
     fn encode_output_len_matches_encoded_len() {
         let codec =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
         let config = LedStripConfig::ws2812b(3);
         let pixels = [
             Rgb::new(255, 0, 0),
@@ -876,7 +917,7 @@ mod tests {
     #[test]
     fn encode_rejects_length_mismatch() {
         let codec =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
         let config = LedStripConfig::ws2812b(2);
         let pixels = [Rgb::new(0, 0, 0)];
         let mut out: HVec<u8, 64> = HVec::new();
@@ -888,10 +929,10 @@ mod tests {
     #[test]
     fn encode_rejects_buffer_too_small() {
         let codec =
-            SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
         let config = LedStripConfig::ws2812b(2);
         let pixels = [Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)];
-        // 2 pixels * 9 bytes = 18 + reset_bytes → need > 30, give only 5
+        // 2 pixels * 9 bytes = 18 + reset_bytes —need > 30, give only 5
         let mut out: HVec<u8, 5> = HVec::new();
 
         let err = codec.encode(&config, &pixels, &mut out).unwrap_err();
@@ -902,8 +943,8 @@ mod tests {
 
     #[test]
     fn inverted_codec_precomputes_patterns_correctly() {
-        let plan = SpiEncodingPlan::ws281x_3bit(); // 0b100, 0b110, 3 bits/symbol
-        let codec = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, true).unwrap();
+        let plan = SpiEncodingPlan::ws2812_3bit(); // 0b100, 0b110, 3 bits/symbol
+        let codec = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, true).unwrap();
 
         // In 3-bit window (mask=0b111): !0b100 = 0b011, !0b110 = 0b001
         assert_eq!(codec.zero_pattern, 0b011);
@@ -913,9 +954,9 @@ mod tests {
 
     #[test]
     fn invert_output_produces_different_data_and_reset() {
-        let plan = SpiEncodingPlan::ws281x_3bit();
-        let codec_normal = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, false).unwrap();
-        let codec_inverted = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, true).unwrap();
+        let plan = SpiEncodingPlan::ws2812_3bit();
+        let codec_normal = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap();
+        let codec_inverted = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, true).unwrap();
         let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::new(255, 0, 0)];
         let mut out_normal: HVec<u8, 128> = HVec::new();
@@ -939,14 +980,85 @@ mod tests {
         assert_eq!(last_inverted, 0xFF, "inverted reset fill should be 0xFF");
     }
 
+    // ── Golden output tests ─────────────────────────────────────────
+
+    #[test]
+    fn black_pixel_produces_all_zero_patterns() {
+        // One BLACK pixel (Rgb=0,0,0) with ws2812_3bit: every payload byte
+        // is 0x92, 0x49, 0x24 (3 bytes per channel, GRB order, repeated).
+        let codec =
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
+        let config = LedStripConfig::ws2812b(1);
+        let pixels = [Rgb::BLACK];
+        let mut out: HVec<u8, 128> = HVec::new();
+        codec.encode(&config, &pixels, &mut out).unwrap();
+
+        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        // 3 channels * 3 bytes/channel = 9 payload bytes
+        assert_eq!(payload_bytes, 9);
+        let expected_cycle: [u8; 3] = [0x92, 0x49, 0x24];
+        for (i, &b) in out[..payload_bytes].iter().enumerate() {
+            assert_eq!(
+                b,
+                expected_cycle[i % 3],
+                "black pixel byte {i}: expected 0x{:02X}, got 0x{b:02X}",
+                expected_cycle[i % 3]
+            );
+        }
+    }
+
+    #[test]
+    fn white_pixel_produces_all_one_patterns() {
+        let codec =
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
+        let config = LedStripConfig::ws2812b(1);
+        let pixels = [Rgb::WHITE];
+        let mut out: HVec<u8, 128> = HVec::new();
+        codec.encode(&config, &pixels, &mut out).unwrap();
+
+        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        assert_eq!(payload_bytes, 9);
+        let expected_cycle: [u8; 3] = [0xDB, 0x6D, 0xB6];
+        for (i, &b) in out[..payload_bytes].iter().enumerate() {
+            assert_eq!(
+                b,
+                expected_cycle[i % 3],
+                "white pixel byte {i}: expected 0x{:02X}, got 0x{b:02X}",
+                expected_cycle[i % 3]
+            );
+        }
+    }
+
+    #[test]
+    fn green_pixel_produces_mixed_patterns_grb() {
+        // Rgb(0,255,0) in GRB order: G=255 (ones), R=0 (zeros), B=0 (zeros)
+        let codec =
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
+        let config = LedStripConfig::ws2812b(1);
+        let pixels = [Rgb::new(0, 255, 0)];
+        let mut out: HVec<u8, 128> = HVec::new();
+        codec.encode(&config, &pixels, &mut out).unwrap();
+
+        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        assert_eq!(payload_bytes, 9);
+        // Channel 1 (G): ones pattern
+        let ones: [u8; 3] = [0xDB, 0x6D, 0xB6];
+        // Channel 2 (R): zeros pattern
+        let zeros: [u8; 3] = [0x92, 0x49, 0x24];
+        // Channel 3 (B): zeros pattern
+        assert_eq!(&out[0..3], &ones, "G channel (first) should be all-ones");
+        assert_eq!(&out[3..6], &zeros, "R channel (second) should be all-zeros");
+        assert_eq!(&out[6..9], &zeros, "B channel (third) should be all-zeros");
+    }
+
     // ── Timing validation boundary tests ─────────────────────────────
 
     #[test]
     fn validate_timing_reports_first_failing_edge() {
         // 4 MHz 3-bit: spi_bit=250 ns
-        // T0H=250 ns (Δ=150, at tolerance ✓), T0L=500 ns (Δ=350, >150 ✗)
+        // T0H=250 ns (Δ=150, at tolerance —, T0L=500 ns (Δ=350, >150 —
         let plan = SpiEncodingPlan::new(4_000_000, 0b100, 0b110, 3);
-        let err = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap_err();
         assert!(matches!(
             err,
             SpiCodecPlanError::TimingOutOfTolerance {
@@ -959,10 +1071,10 @@ mod tests {
     #[test]
     fn timing_exactly_at_tolerance_boundary_passes() {
         // 2.5 MHz 3-bit: spi_bit=400 ns
-        // T0H=400 ns (Δ=0 ≤ 150 ✓), T0L=800 ns (Δ=50 ≤ 150 ✓)
-        // T1H=800 ns (Δ=0 ≤ 150 ✓), T1L=400 ns (Δ=50 ≤ 150 ✓)
+        // T0H=400 ns (Δ=0 —150 —, T0L=800 ns (Δ=50 —150 —
+        // T1H=800 ns (Δ=0 —150 —, T1L=400 ns (Δ=50 —150 —
         let plan = SpiEncodingPlan::new(2_500_000, 0b100, 0b110, 3);
-        SpiCodec::for_protocol::<Rgb, Ws2812B>(plan, false).unwrap();
+        SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap();
     }
 
     // ── SpiEncodingPlan getters / extra_reset ───────────────────────
@@ -979,7 +1091,7 @@ mod tests {
 
     #[test]
     fn plan_with_extra_reset_ns_stores_value() {
-        let plan = SpiEncodingPlan::ws281x_3bit().with_extra_reset_ns(10_000);
+        let plan = SpiEncodingPlan::ws2812_3bit().with_extra_reset_ns(10_000);
         assert_eq!(plan.extra_reset_ns(), 10_000);
     }
 
@@ -987,25 +1099,25 @@ mod tests {
 
     #[test]
     fn spi_codec_new_with_valid_plan_succeeds() {
-        SpiCodec::new(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+        SpiCodec::<Rgb, Ws2812B>::new(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
     }
 
     #[test]
     fn spi_codec_new_with_inverted_output_succeeds() {
-        SpiCodec::new(SpiEncodingPlan::ws281x_3bit(), true).unwrap();
+        SpiCodec::<Rgb, Ws2812B>::new(SpiEncodingPlan::ws2812_3bit(), true).unwrap();
     }
 
     #[test]
     fn spi_codec_new_rejects_zero_clock() {
         let plan = SpiEncodingPlan::new(0, 0b100, 0b110, 3);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert_eq!(err, SpiCodecPlanError::ZeroClock);
     }
 
     #[test]
     fn spi_codec_plan_accessor_returns_original_plan() {
-        let plan = SpiEncodingPlan::ws281x_3bit();
-        let codec = SpiCodec::new(plan, false).unwrap();
+        let plan = SpiEncodingPlan::ws2812_3bit();
+        let codec = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap();
         assert_eq!(codec.plan(), plan);
     }
 
@@ -1076,7 +1188,7 @@ mod tests {
     #[test]
     fn encode_sk6812_produces_correct_length() {
         let codec =
-            SpiCodec::for_protocol::<Rgbw, Sk6812>(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
+            SpiCodec::<Rgbw, Sk6812>::for_protocol(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
         let config = LedStripConfig::sk6812(2);
         let pixels = [Rgbw::new(0, 0, 0, 0), Rgbw::new(0, 0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
@@ -1086,9 +1198,9 @@ mod tests {
 
     #[test]
     fn encode_ws2811_produces_correct_length() {
-        // WS2811 wide 8-bit symbols — use SpiCodec::new without timing validation.
-        let plan = SpiEncodingPlan::new(4_800_000, 0b11100000, 0b11111110, 8);
-        let codec = SpiCodec::new(plan, false).unwrap();
+        // 8-bit symbols at 3.2 MHz -- all edges within +/-150 ns of WS2811 spec.
+        let codec =
+            SpiCodec::<Rgb, Ws2811>::for_protocol(SpiEncodingPlan::ws2811_8bit(), false).unwrap();
         let config = LedStripConfig::ws2811(2);
         let pixels = [Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
@@ -1098,9 +1210,9 @@ mod tests {
 
     #[test]
     fn encode_ws2816_produces_correct_length() {
-        // 4 MHz, 4-bit: spi_bit=250, all edges within ±150 ns of WS2816 spec.
+        // 4 MHz, 4-bit: spi_bit=250, all edges within +/-150 ns of WS2816 spec.
         let plan = SpiEncodingPlan::new(4_000_000, 0b1000, 0b1100, 4);
-        let codec = SpiCodec::for_protocol::<Rgb16, Ws2816>(plan, false).unwrap();
+        let codec = SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap();
         let config = LedStripConfig::ws2816(1);
         let pixels = [Rgb16::new(0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
@@ -1112,10 +1224,10 @@ mod tests {
 
     #[test]
     fn extra_reset_ns_increases_encoded_len() {
-        let plan_normal = SpiEncodingPlan::ws281x_3bit();
-        let plan_extra = SpiEncodingPlan::ws281x_3bit().with_extra_reset_ns(100_000);
-        let codec_normal = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_normal, false).unwrap();
-        let codec_extra = SpiCodec::for_protocol::<Rgb, Ws2812B>(plan_extra, false).unwrap();
+        let plan_normal = SpiEncodingPlan::ws2812_3bit();
+        let plan_extra = SpiEncodingPlan::ws2812_3bit().with_extra_reset_ns(100_000);
+        let codec_normal = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan_normal, false).unwrap();
+        let codec_extra = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan_extra, false).unwrap();
         let config = LedStripConfig::ws2812b(1);
         let len_normal = codec_normal.encoded_len(&config);
         let len_extra = codec_extra.encoded_len(&config);
@@ -1130,14 +1242,14 @@ mod tests {
     #[test]
     fn validate_plan_rejects_zero_bits_per_symbol() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b100, 0b110, 0);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert_eq!(err, SpiCodecPlanError::ZeroBitsPerSymbol);
     }
 
     #[test]
     fn validate_plan_rejects_bits_per_symbol_too_wide() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b1, 0b1, 9);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert_eq!(
             err,
             SpiCodecPlanError::BitsPerSymbolTooWide { bits_per_symbol: 9 }
@@ -1147,7 +1259,7 @@ mod tests {
     #[test]
     fn validate_plan_rejects_zero_pattern_out_of_range() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b1111, 0b110, 3);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert!(matches!(
             err,
             SpiCodecPlanError::PatternOutOfRange {
@@ -1160,7 +1272,7 @@ mod tests {
     #[test]
     fn validate_plan_rejects_one_pattern_out_of_range() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b100, 0b1111, 3);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert!(matches!(
             err,
             SpiCodecPlanError::PatternOutOfRange {
@@ -1173,7 +1285,7 @@ mod tests {
     #[test]
     fn validate_plan_rejects_non_contiguous_waveform() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b101, 0b110, 3);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert!(matches!(
             err,
             SpiCodecPlanError::InvalidSymbolWaveform {
@@ -1186,7 +1298,7 @@ mod tests {
     #[test]
     fn validate_plan_rejects_low_leading_waveform() {
         let plan = SpiEncodingPlan::new(2_400_000, 0b011, 0b110, 3);
-        let err = SpiCodec::new(plan, false).unwrap_err();
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
         assert!(matches!(
             err,
             SpiCodecPlanError::InvalidSymbolWaveform {
