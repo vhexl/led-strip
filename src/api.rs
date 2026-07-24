@@ -103,13 +103,10 @@ where
 
     /// Encodes `pixels` into transport words, appending to `out`.
     ///
-    /// The caller passes the expected pixel count via `pixel_count` so
-    /// implementors can pre-validate capacity without trusting `pixels.len()`.
     /// The buffer is cleared before encoding begins, so callers may safely
     /// reuse a buffer across multiple `encode` calls without manual `out.clear()`.
     fn encode<const TX_CAPACITY: usize>(
         &self,
-        pixel_count: usize,
         color_order: P::Order,
         pixels: &[P],
         out: &mut Vec<Word, TX_CAPACITY>,
@@ -187,7 +184,7 @@ where
         pixels: &[P],
     ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
         self.codec
-            .encode(pixels.len(), self.color_order, pixels, &mut self.tx_buf)
+            .encode(self.color_order, pixels, &mut self.tx_buf)
             .map_err(|e| e.map_operation(RefreshError::Codec))?;
 
         self.backend
@@ -207,9 +204,9 @@ where
 impl<P, Proto, Codec, Backend, const TX_CAPACITY: usize> core::fmt::Debug
     for LedStrip<P, Proto, Codec, Backend, TX_CAPACITY>
 where
-    P: LedPixel + core::fmt::Debug,
+    P: LedPixel,
     P::Order: core::fmt::Debug,
-    Proto: SingleWireProtocol<P> + core::fmt::Debug,
+    Proto: SingleWireProtocol<P>,
     Codec: WireCodec<P, Proto, Backend::Word> + core::fmt::Debug,
     Backend: TransportBackend + core::fmt::Debug,
     Backend::Word: core::fmt::Debug,

@@ -53,7 +53,7 @@ flowchart LR
 
 **Pipeline**:
 1. User calls `write(pixels)` with a dynamic-length pixel slice.
-2. `LedStrip::write()` calls `Codec::encode(pixel_count, color_order, pixels, &mut tx_buf)`.
+2. `LedStrip::write()` calls `Codec::encode(color_order, pixels, &mut tx_buf)`.
 3. `Backend::transmit(tx_buf)` pushes the byte stream to the peripheral.
 4. The codec appends **reset (latch) fill bytes** at the end — the backend is oblivious to protocol timing.
 
@@ -134,7 +134,6 @@ pub trait WireCodec<P: LedPixel, Proto: SingleWireProtocol<P>, Word: Copy> {
     fn encoded_len(&self, pixel_count: usize) -> usize;
     fn encode<const TX_CAPACITY: usize>(
         &self,
-        pixel_count: usize,
         color_order: P::Order,
         pixels: &[P],
         out: &mut Vec<Word, TX_CAPACITY>,

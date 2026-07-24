@@ -15,6 +15,7 @@ mod private {
 
 /// Bit transmission order within a byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BitOrder {
     /// Most significant bit first (WS2812-family default).
     MsbFirst,
@@ -70,19 +71,19 @@ where
 }
 
 /// Protocol marker for WS2812B (3-channel 8-bit RGB, GRB order, 800 kbps).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ws2812B;
 
 /// Protocol marker for WS2811 (3-channel 8-bit RGB, RGB order, 400 kbps slow mode).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ws2811;
 
 /// Protocol marker for SK6812 (4-channel 8-bit RGBW, GRBW order).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sk6812;
 
 /// Protocol marker for WS2816 (3-channel 16-bit RGB, GRB order).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ws2816;
 
 impl SingleWireProtocol<Rgb> for Ws2812B {
