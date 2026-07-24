@@ -1,12 +1,10 @@
-use core::convert::Infallible;
+use core::marker::PhantomData;
 
 use heapless::Vec;
 
-use crate::{
-    FrameBuf, LedPixel, LedStripConfig, LedStripError, LedStripResult, SingleWireProtocol,
-};
+use crate::{LedPixel, LedStripError, LedStripResult, SingleWireProtocol};
 
-/// Unified error type returned by [`LedStrip::refresh`] and [`LedStrip::clear`].
+/// Unified error type returned by [`LedStrip::write`].
 ///
 /// Wraps either a codec-level error (encoding failure) or a backend-level
 /// error (transmission failure), so callers see a single error shape
@@ -14,7 +12,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RefreshError<CodecError, BackendError> {
-    /// The codec failed to encode the frame into transport words.
+    /// The codec failed to encode the pixel data into transport words.
     Codec(CodecError),
     /// The transport backend failed to transmit the encoded words.
     Backend(BackendError),
@@ -80,8 +78,8 @@ pub trait TransportBackend {
 /// # Implementing
 ///
 /// - [`encoded_len`](Self::encoded_len) must return the exact number of
-///   `Word`s that [`encode`](Self::encode) will produce (including
-///   reset/trailer). This is used for capacity checks before encoding.
+///   `Word`s that [`encode`](Self::encode) will produce for the given pixel
+///   count (including reset/trailer). This is used for capacity checks before encoding.
 /// - [`encode`](Self::encode) writes into a caller-supplied `Vec` to avoid
 ///   heap allocation.
 pub trait WireCodec<P, Proto, Word>
@@ -96,33 +94,33 @@ where
     ///
     /// Separated from [`Error`](Self::Error) because some codecs (e.g.
     /// [`SpiCodec`](crate::SpiCodec)) never fail during encoding —the
-    /// only possible errors are structural (`InvalidLength`,
-    /// `BufferTooSmall`).
+    /// only possible error is `BufferTooSmall`.
     type EncodeError;
 
     /// Returns the exact number of `Word`s that [`encode`](Self::encode) will
-    /// produce for the given configuration. Includes payload + reset/trailer overhead.
-    fn encoded_len(&self, config: &LedStripConfig<P, Proto>) -> usize;
+    /// produce for `pixel_count` pixels. Includes payload + reset/trailer overhead.
+    fn encoded_len(&self, pixel_count: usize) -> usize;
 
     /// Encodes `pixels` into transport words, appending to `out`.
     ///
-    /// The caller must ensure `out` has enough capacity (use [`encoded_len`](Self::encoded_len)).
-    /// The buffer is cleared before encoding begins, so callers may safely reuse
-    /// a buffer across multiple `encode` calls without manual `out.clear()`.
+    /// The caller passes the expected pixel count via `pixel_count` so
+    /// implementors can pre-validate capacity without trusting `pixels.len()`.
+    /// The buffer is cleared before encoding begins, so callers may safely
+    /// reuse a buffer across multiple `encode` calls without manual `out.clear()`.
     fn encode<const TX_CAPACITY: usize>(
         &self,
-        config: &LedStripConfig<P, Proto>,
+        pixel_count: usize,
+        color_order: P::Order,
         pixels: &[P],
         out: &mut Vec<Word, TX_CAPACITY>,
     ) -> LedStripResult<(), Self::EncodeError>;
 }
 
-/// High-level driver for a single-wire addressable LED strip.
+/// Stateless driver for a single-wire addressable LED strip.
 ///
-/// Owns the configuration, frame buffer, codec, and transport backend.
-/// This is the primary API entry point —construct one, then call
-/// [`set`](Self::set) / [`write`](Self::write) / [`fill`](Self::fill) to
-/// update pixels and [`refresh`](Self::refresh) to push the frame to the strip.
+/// Owns a codec, a transport backend, and a reusable transmission buffer.
+/// This driver does **not** cache a frame buffer —each [`write`](Self::write) call accepts a dynamic-length pixel slice,
+/// encodes it, and transmits it to the strip in a single operation.
 ///
 /// # Type parameters
 ///
@@ -132,132 +130,64 @@ where
 /// | `Proto` | Protocol marker ([`crate::Ws2812B`], [`crate::Sk6812`], [`crate::Ws2811`], [`crate::Ws2816`]) |
 /// | `Codec` | Encoding scheme (currently [`crate::SpiCodec`]; future backends may provide their own) |
 /// | `Backend` | Transport layer (currently [`crate::SpiBackend`]; future backends may provide their own) |
-/// | `MAX_LEDS` | Compile-time upper bound on pixel count |
 /// | `TX_CAPACITY` | Compile-time upper bound on transport buffer size (in `Word`s) |
-///
-/// # Capacity validation
-///
-/// All capacity checks happen once in [`new`](Self::new). If it returns `Ok`,
-/// subsequent [`refresh`](Self::refresh) / [`set`](Self::set) /
-/// [`write`](Self::write) calls will never fail with `BufferTooSmall`.
-pub struct LedStrip<P, Proto, Codec, Backend, const MAX_LEDS: usize, const TX_CAPACITY: usize>
+pub struct LedStrip<P, Proto, Codec, Backend, const TX_CAPACITY: usize>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
     Codec: WireCodec<P, Proto, Backend::Word>,
     Backend: TransportBackend,
 {
-    config: LedStripConfig<P, Proto>,
-    frame: FrameBuf<P, MAX_LEDS>,
+    color_order: P::Order,
     codec: Codec,
     backend: Backend,
     tx_buf: Vec<Backend::Word, TX_CAPACITY>,
+    _proto: PhantomData<Proto>,
 }
 
-impl<P, Proto, Codec, Backend, const MAX_LEDS: usize, const TX_CAPACITY: usize>
-    LedStrip<P, Proto, Codec, Backend, MAX_LEDS, TX_CAPACITY>
+impl<P, Proto, Codec, Backend, const TX_CAPACITY: usize>
+    LedStrip<P, Proto, Codec, Backend, TX_CAPACITY>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
     Codec: WireCodec<P, Proto, Backend::Word>,
     Backend: TransportBackend,
 {
-    /// Constructs the driver and validates all capacity constraints once.
+    /// Constructs the driver.
     ///
-    /// Capacity errors (`BufferTooSmall`) are only returned here —once `new`
-    /// succeeds, `refresh`/`set`/`write`/`clear` will never report capacity
-    /// failures on the hot path.
-    pub fn new(
-        config: LedStripConfig<P, Proto>,
-        codec: Codec,
-        backend: Backend,
-    ) -> LedStripResult<Self, Infallible> {
-        if config.len() > MAX_LEDS {
-            return Err(LedStripError::BufferTooSmall {
-                required: config.len(),
-                capacity: MAX_LEDS,
-            });
-        }
-
-        // Guard against silent overflow of frame_len_bytes() on narrow
-        // targets (e.g. 16-bit usize). In practice MAX_LEDS bounds this to
-        // safe values; this assertion catches logic errors in config construction.
-        debug_assert!(
-            config.frame_len_bytes() >= config.len() || config.is_empty(),
-            "frame_len_bytes overflow detected; reduce pixel count or use a 32-bit+ target"
-        );
-
-        let required = codec.encoded_len(&config);
-        if required > TX_CAPACITY {
-            return Err(LedStripError::BufferTooSmall {
-                required,
-                capacity: TX_CAPACITY,
-            });
-        }
-
-        Ok(Self {
-            frame: FrameBuf::from_config(&config)?,
-            config,
+    /// `color_order` determines the on-wire byte order (e.g. `RgbOrder::Grb`
+    /// for WS2812B). Use the protocol's `DEFAULT_COLOR_ORDER` associated
+    /// constant for the typical wiring.
+    ///
+    /// No capacity validation is performed here —[`write`](Self::write)
+    /// checks `TX_CAPACITY` on each call and returns
+    /// [`BufferTooSmall`](LedStripError::BufferTooSmall) if the encoded
+    /// frame exceeds the buffer.
+    #[must_use]
+    pub fn new(color_order: P::Order, codec: Codec, backend: Backend) -> Self {
+        Self {
+            color_order,
             codec,
             backend,
             tx_buf: Vec::new(),
-        })
+            _proto: PhantomData,
+        }
     }
 
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.frame.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.frame.is_empty()
-    }
-
-    #[must_use]
-    pub const fn config(&self) -> &LedStripConfig<P, Proto> {
-        &self.config
-    }
-
-    /// Returns the pixel at `index`, or `None` if out of bounds.
-    #[must_use]
-    pub fn get(&self, index: usize) -> Option<&P> {
-        self.frame.as_slice().get(index)
-    }
-
-    /// Sets the pixel at `index`.
+    /// Encodes `pixels` and transmits them to the LED strip in one call.
     ///
-    /// Returns [`LedStripError::InvalidIndex`] if `index` is out of bounds.
-    /// Does **not** produce codec or backend errors —those only occur in
-    /// [`refresh`](Self::refresh).
-    pub fn set(&mut self, index: usize, pixel: P) -> LedStripResult<(), Infallible> {
-        self.frame.set(index, pixel)?;
-        Ok(())
-    }
-
-    /// Bulk-overwrites all pixels from the given slice.
+    /// Returns [`LedStripError::BufferTooSmall`] if the encoded payload
+    /// (including reset/trailer) exceeds `TX_CAPACITY`. All other errors
+    /// are wrapped in [`RefreshError`].
     ///
-    /// The slice length must equal [`len`](Self::len). Returns
-    /// [`LedStripError::InvalidLength`] on mismatch. Does **not** produce
-    /// codec or backend errors.
-    pub fn write(&mut self, pixels: &[P]) -> LedStripResult<(), Infallible> {
-        self.frame.write(pixels)?;
-        Ok(())
-    }
-
-    pub fn fill(&mut self, pixel: P) {
-        self.frame.fill(pixel);
-    }
-
-    pub fn clear_pixels(&mut self) {
-        self.frame.clear();
-    }
-
-    pub fn refresh(
+    /// The pixel count is dynamic —pass any slice length supported by your
+    /// `TX_CAPACITY`.
+    pub fn write(
         &mut self,
+        pixels: &[P],
     ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
         self.codec
-            .encode(&self.config, self.frame.as_slice(), &mut self.tx_buf)
+            .encode(pixels.len(), self.color_order, pixels, &mut self.tx_buf)
             .map_err(|e| e.map_operation(RefreshError::Codec))?;
 
         self.backend
@@ -265,23 +195,17 @@ where
             .map_err(|error| LedStripError::Operation(RefreshError::Backend(error)))
     }
 
-    pub fn clear(
-        &mut self,
-    ) -> LedStripResult<(), RefreshError<Codec::EncodeError, Backend::Error>> {
-        self.clear_pixels();
-        self.refresh()
-    }
-
-    /// Destructures the driver, returning ownership of all parts.
+    /// Destructures the driver, returning ownership of the codec and backend.
     /// Useful for reusing the backend (e.g. SPI bus) or the codec
     /// after the LED strip is no longer needed.
-    pub fn into_parts(self) -> (LedStripConfig<P, Proto>, Codec, Backend) {
-        (self.config, self.codec, self.backend)
+    #[must_use]
+    pub fn into_parts(self) -> (Codec, Backend) {
+        (self.codec, self.backend)
     }
 }
 
-impl<P, Proto, Codec, Backend, const MAX_LEDS: usize, const TX_CAPACITY: usize> core::fmt::Debug
-    for LedStrip<P, Proto, Codec, Backend, MAX_LEDS, TX_CAPACITY>
+impl<P, Proto, Codec, Backend, const TX_CAPACITY: usize> core::fmt::Debug
+    for LedStrip<P, Proto, Codec, Backend, TX_CAPACITY>
 where
     P: LedPixel + core::fmt::Debug,
     P::Order: core::fmt::Debug,
@@ -292,8 +216,7 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LedStrip")
-            .field("config", &self.config)
-            .field("frame", &self.frame)
+            .field("color_order", &self.color_order)
             .field("codec", &self.codec)
             .field("backend", &self.backend)
             .field("tx_buf", &self.tx_buf)
@@ -356,7 +279,7 @@ mod tests {
 
     // ── LedStrip integration tests ──────────────────────────────────
 
-    use crate::{LedStripConfig, Rgb, SpiCodec, SpiEncodingPlan, Ws2812B};
+    use crate::{Rgb, RgbOrder, SpiCodec, SpiEncodingPlan, Ws2812B};
     use core::cell::Cell;
 
     /// Mock backend that records the byte count of the last transmit call.
@@ -382,169 +305,74 @@ mod tests {
         }
     }
 
-    type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 16, 256>;
+    type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 256>;
 
     fn make_codec() -> SpiCodec<Rgb, Ws2812B> {
         SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap()
     }
 
-    fn make_strip(len: usize) -> TestStrip {
-        let config = LedStripConfig::ws2812b(len);
-        TestStrip::new(config, make_codec(), MockBackend::new()).unwrap()
+    fn make_strip() -> TestStrip {
+        TestStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new())
     }
 
     #[test]
-    fn new_accepts_valid_config() {
-        let strip = make_strip(8);
-        assert_eq!(strip.len(), 8);
-        assert!(!strip.is_empty());
+    fn new_constructs_without_error() {
+        let strip = make_strip();
+        // Verify default state
+        let _ = format!("{strip:?}");
     }
 
     #[test]
-    fn new_accepts_zero_len() {
-        let config = LedStripConfig::ws2812b(0);
-        let strip = TestStrip::new(config, make_codec(), MockBackend::new()).unwrap();
-        assert!(strip.is_empty());
-        assert_eq!(strip.len(), 0);
-    }
-
-    #[test]
-    fn new_rejects_too_many_leds() {
-        let config = LedStripConfig::ws2812b(20); // MAX_LEDS = 16
-        let err = TestStrip::new(config, make_codec(), MockBackend::new()).unwrap_err();
-        assert_eq!(
-            err,
-            LedStripError::BufferTooSmall {
-                required: 20,
-                capacity: 16,
-            }
+    fn write_transmits_encoded_data() {
+        let mut strip = make_strip();
+        strip
+            .write(&[
+                Rgb::new(255, 0, 0),
+                Rgb::new(0, 255, 0),
+                Rgb::new(0, 0, 255),
+            ])
+            .unwrap();
+        assert!(
+            strip.backend.last_tx_len() > 0,
+            "expected non-zero transmit length"
         );
     }
 
     #[test]
-    fn new_rejects_tx_capacity_overflow() {
-        // 6 pixels × 9 payload bytes + reset —69 bytes, but TX_CAPACITY = 5
-        type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 16, 5>;
-        let config = LedStripConfig::ws2812b(6);
-        let err = TinyStrip::new(config, make_codec(), MockBackend::new()).unwrap_err();
+    fn write_with_zero_pixels_sends_reset_only() {
+        let mut strip = make_strip();
+        strip.write(&[]).unwrap();
+        // Zero pixels still produce reset/latch bytes
+        assert!(strip.backend.last_tx_len() > 0);
+    }
+
+    #[test]
+    fn write_rejects_buffer_too_small() {
+        type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 5>;
+        let mut strip = TinyStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new());
+        // 2 pixels × 9 payload bytes + reset ≫ 5
+        let err = strip
+            .write(&[Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)])
+            .unwrap_err();
         assert!(matches!(err, LedStripError::BufferTooSmall { .. }));
     }
 
     #[test]
-    fn config_accessor_returns_config() {
-        let strip = make_strip(3);
-        assert_eq!(strip.config().len(), 3);
-    }
-
-    #[test]
-    fn set_updates_pixel() {
-        let mut strip = make_strip(4);
-        strip.set(1, Rgb::new(10, 20, 30)).unwrap();
-        assert_eq!(strip.get(1), Some(&Rgb::new(10, 20, 30)));
-    }
-
-    #[test]
-    fn set_rejects_invalid_index() {
-        let mut strip = make_strip(4);
-        let err = strip.set(4, Rgb::new(1, 2, 3)).unwrap_err();
-        assert!(matches!(err, LedStripError::InvalidIndex));
-    }
-
-    #[test]
-    fn write_updates_all_pixels() {
-        let mut strip = make_strip(3);
-        strip
-            .write(&[Rgb::new(1, 2, 3), Rgb::new(4, 5, 6), Rgb::new(7, 8, 9)])
-            .unwrap();
-        strip.refresh().unwrap();
-        assert!(strip.backend.last_tx_len() > 0);
-    }
-
-    #[test]
-    fn write_rejects_length_mismatch() {
-        let mut strip = make_strip(4);
-        let err = strip.write(&[Rgb::new(1, 2, 3)]).unwrap_err();
-        assert!(matches!(err, LedStripError::InvalidLength { .. }));
-    }
-
-    #[test]
-    fn fill_sets_all_pixels() {
-        let mut strip = make_strip(4);
-        strip.fill(Rgb::new(255, 0, 0));
-        strip.refresh().unwrap();
-        assert!(strip.backend.last_tx_len() > 0);
-    }
-
-    #[test]
-    fn clear_pixels_then_refresh_zeroes_output() {
-        let mut strip = make_strip(4);
-        strip.fill(Rgb::WHITE);
-        strip.clear_pixels();
-        strip.refresh().unwrap();
-        assert!(strip.backend.last_tx_len() > 0);
-    }
-
-    #[test]
-    fn refresh_transmits_encoded_data() {
-        let mut strip = make_strip(2);
-        strip.refresh().unwrap();
-        let tx_len = strip.backend.last_tx_len();
-        // 2 pixels × 9 bytes + reset —should be non-zero
-        assert!(
-            tx_len > 0,
-            "expected non-zero transmit length, got {tx_len}"
-        );
-    }
-
-    #[test]
-    fn clear_combines_clear_pixels_and_refresh() {
-        let mut strip = make_strip(4);
-        strip.fill(Rgb::WHITE);
-        strip.refresh().unwrap();
-        let filled_len = strip.backend.last_tx_len();
-
-        strip.clear().unwrap();
-        let cleared_len = strip.backend.last_tx_len();
-
-        // Both should produce non-zero output (data + reset)
-        assert!(filled_len > 0);
-        assert!(cleared_len > 0);
-    }
-
-    #[test]
-    fn into_parts_returns_owned_components() {
-        let strip = make_strip(4);
-        let (config, codec, _backend) = strip.into_parts();
-        assert_eq!(config.len(), 4);
+    fn into_parts_returns_owned_codec_and_backend() {
+        let strip = make_strip();
+        let (codec, _backend) = strip.into_parts();
         // Verify the codec still works
         assert_eq!(codec.plan().spi_hz(), 2_400_000);
     }
 
     #[test]
     fn debug_output_contains_fields() {
-        let strip = make_strip(2);
+        let strip = make_strip();
         let s = format!("{strip:?}");
         assert!(s.contains("LedStrip"), "{s}");
-        assert!(s.contains("config"), "{s}");
-        assert!(s.contains("frame"), "{s}");
+        assert!(s.contains("color_order"), "{s}");
         assert!(s.contains("codec"), "{s}");
         assert!(s.contains("backend"), "{s}");
         assert!(s.contains("tx_buf"), "{s}");
-    }
-
-    // ── map_operation ───────────────────────────────────────────────
-
-    #[test]
-    fn map_operation_preserves_structural_variants() {
-        let e: LedStripError<core::convert::Infallible> = LedStripError::InvalidIndex;
-        let mapped: LedStripError<&str> = e.map_operation(|_| unreachable!());
-        assert_eq!(mapped, LedStripError::InvalidIndex);
-    }
-
-    #[test]
-    fn map_operation_wraps_operation_variant() {
-        let e: LedStripError<&str> = LedStripError::Operation("inner");
-        let mapped: LedStripError<usize> = e.map_operation(|s| s.len());
-        assert_eq!(mapped, LedStripError::Operation(5));
     }
 }

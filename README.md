@@ -15,7 +15,7 @@ and zero heap allocations.
 - **RMT & PIO backends** — compile-time skeletons; full transmit/encode paths pending
 - Typed pixel formats: `Rgb` (8-bit), `Rgbw` (8-bit + white), `Rgb16` (16-bit)
 - Typed protocol presets: `Ws2812`, `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
-- Compile-time capacity checks in `LedStrip::new`; hot-path `refresh` never fails on sizing
+- Compile-time capacity checks in `LedStrip::write`; encode + transmit in one call
 - SPI encoding plan validation at construction time (bit-by-bit symbol simulation + timing tolerance vs protocol spec)
 - Explicit `SpiEncodeError::InternalConsistency` for impossible post-check encode overflows
 - `invert_output` support for boards with external inverter circuits
@@ -24,19 +24,18 @@ and zero heap allocations.
 ## Usage
 
 ```rust
-use led_strip::{LedStrip, LedStripConfig, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, Ws2812B};
+use led_strip::{LedStrip, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, RgbOrder, Ws2812B};
 
 // Type-alias to reduce turbofish noise
-type MyStrip = LedStrip<Rgb, Ws2812B, SpiCodec, SpiBackend<MySpi>, 60, 1024>;
+type MyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, SpiBackend<MySpi>, 1024>;
 
-let config = LedStripConfig::ws2812b(60);
-let codec = SpiCodec::for_protocol::<Rgb, Ws2812B>(SpiEncodingPlan::ws281x_3bit(), false).unwrap();
+let codec = SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
 let backend = SpiBackend::new(spi); // spi: impl embedded_hal::spi::SpiBus<u8>
 
-let mut strip = MyStrip::new(config, codec, backend).unwrap();
+let mut strip = MyStrip::new(RgbOrder::Grb, codec, backend);
 
-strip.fill(Rgb::new(255, 0, 0));
-strip.refresh().unwrap();
+let pixels = [Rgb::new(255, 0, 0); 60];
+strip.write(&pixels).unwrap();
 ```
 
 ## Releasing

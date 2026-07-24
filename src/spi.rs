@@ -4,8 +4,7 @@ use embedded_hal::spi::SpiBus;
 use heapless::Vec;
 
 use crate::{
-    LedPixel, LedStripConfig, LedStripError, LedStripResult, SingleWireProtocol, TransportBackend,
-    WireCodec,
+    LedPixel, LedStripError, LedStripResult, SingleWireProtocol, TransportBackend, WireCodec,
 };
 
 /// SPI clock frequency, bit patterns, and symbol width for encoding a
@@ -218,13 +217,17 @@ impl core::fmt::Display for SpiCodecPlanError {
 
 impl core::error::Error for SpiCodecPlanError {}
 
-/// Rare encode-time failures that indicate an internal consistency bug.
+/// Rare encode-time failures.
 ///
-/// `SpiCodec::encode` validates required capacity up front. If this error
-/// appears, `encoded_len` and hot-path writes have diverged.
+/// `SpiCodec::encode` validates required capacity up front. If
+/// `InternalConsistency` appears, `encoded_len` and hot-path writes have
+/// diverged —this indicates a logic bug in the codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpiEncodeError {
+    /// `pixel_count` passed to [`encode`](crate::WireCodec::encode) does not
+    /// match `pixels.len()`. The caller must ensure these agree.
+    PixelCountMismatch { declared: usize, actual: usize },
     InternalConsistency {
         stage: &'static str,
         required: usize,
@@ -236,6 +239,10 @@ pub enum SpiEncodeError {
 impl core::fmt::Display for SpiEncodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::PixelCountMismatch { declared, actual } => write!(
+                f,
+                "pixel count mismatch: declared={declared}, actual={actual}"
+            ),
             Self::InternalConsistency {
                 stage,
                 required,
@@ -342,20 +349,20 @@ where
     /// `Proto::RESET_NS + extra_reset_ns` at the current SPI clock rate.
     ///
     /// Uses ceiling division: `ceil(ns * spi_hz / 1e9)`.
-    fn reset_bytes_for(&self, config: &LedStripConfig<P, Proto>) -> usize
+    fn reset_bytes(&self) -> usize
     where
         P: LedPixel,
         Proto: SingleWireProtocol<P>,
     {
-        let total_reset_ns = u64::from(config.reset_ns()) + u64::from(self.plan.extra_reset_ns);
+        let total_reset_ns = u64::from(Proto::RESET_NS) + u64::from(self.plan.extra_reset_ns);
 
         // Fixed-point arithmetic: reset_ns × spi_hz gives scaled clock cycles
         // (in units of 10^9); dividing by 8 × 10^9 converts to SPI bytes in
-        // one step (cycles —seconds —bytes).
+        // one step (cycles → seconds → bytes).
         let Some(scaled_cycles) = total_reset_ns.checked_mul(u64::from(self.plan.spi_hz)) else {
             // Overflow only at physically impossible parameters
             // (multi-second reset at GHz clocks). Return a value that will
-            // fail the capacity check in `new()`.
+            // fail the capacity check.
             return usize::MAX;
         };
 
@@ -373,20 +380,23 @@ where
     type Error = SpiCodecPlanError;
     type EncodeError = SpiEncodeError;
 
-    fn encoded_len(&self, config: &LedStripConfig<P, Proto>) -> usize {
-        let Some(payload_bits) = config
-            .frame_len_bytes()
+    fn encoded_len(&self, pixel_count: usize) -> usize {
+        let Some(frame_bytes) = pixel_count.checked_mul(P::BYTES_PER_PIXEL) else {
+            return usize::MAX;
+        };
+
+        let Some(payload_bits) = frame_bytes
             .checked_mul(8)
             .and_then(|v| v.checked_mul(usize::from(self.plan.bits_per_symbol)))
         else {
-            // Overflow —return a value that will fail the capacity check in `new()`.
+            // Overflow —return a value that will fail the capacity check.
             // In practice this path is unreachable on 32-bit+ platforms for any real
             // LED strip (would require billions of pixels).
             return usize::MAX;
         };
 
         let payload_bytes = payload_bits.saturating_add(7) / 8;
-        let total = payload_bytes.saturating_add(self.reset_bytes_for(config));
+        let total = payload_bytes.saturating_add(self.reset_bytes());
 
         // Saturating arithmetic on a 32-bit (or wider) usize only triggers at
         // millions of LEDs —far beyond any real strip.  Still, if it ever
@@ -401,18 +411,21 @@ where
 
     fn encode<const TX_CAPACITY: usize>(
         &self,
-        config: &LedStripConfig<P, Proto>,
+        pixel_count: usize,
+        color_order: P::Order,
         pixels: &[P],
         out: &mut Vec<u8, TX_CAPACITY>,
     ) -> LedStripResult<(), Self::EncodeError> {
-        if pixels.len() != config.len() {
-            return Err(LedStripError::InvalidLength {
-                expected: config.len(),
-                actual: pixels.len(),
-            });
+        if pixel_count != pixels.len() {
+            return Err(LedStripError::Operation(
+                SpiEncodeError::PixelCountMismatch {
+                    declared: pixel_count,
+                    actual: pixels.len(),
+                },
+            ));
         }
 
-        let required = self.encoded_len(config);
+        let required = self.encoded_len(pixel_count);
         if required > TX_CAPACITY {
             return Err(LedStripError::BufferTooSmall {
                 required,
@@ -426,7 +439,7 @@ where
         let mut used_bits = 0_u8;
         let mut raw = [0_u8; 6];
         for pixel in pixels.iter().copied() {
-            pixel.encode(config.color_order(), &mut raw[..P::BYTES_PER_PIXEL]);
+            pixel.encode(color_order, &mut raw[..P::BYTES_PER_PIXEL]);
 
             for byte in &raw[..P::BYTES_PER_PIXEL] {
                 for bit_index in 0..8 {
@@ -470,7 +483,7 @@ where
             })?;
         }
 
-        let reset_bytes = self.reset_bytes_for(config);
+        let reset_bytes = self.reset_bytes();
         let target_len = out.len().saturating_add(reset_bytes);
         out.resize(target_len, self.reset_fill).map_err(|_| {
             LedStripError::Operation(SpiEncodeError::InternalConsistency {
@@ -875,18 +888,17 @@ mod tests {
 
     // ── Encode end-to-end tests ──────────────────────────────────────
 
-    use crate::{LedStripConfig, LedStripError};
+    use crate::{LedStripError, RgbOrder};
     use heapless::Vec as HVec;
 
     #[test]
     fn encode_produces_nonempty_buffer() {
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::new(0, 255, 0)];
         let mut out: HVec<u8, 64> = HVec::new();
 
-        codec.encode(&config, &pixels, &mut out).unwrap();
+        codec.encode(1, RgbOrder::Grb, &pixels, &mut out).unwrap();
 
         assert!(!out.is_empty(), "encoded output should not be empty");
         // ws2812_3bit: 3 ch × 8 bits × 3 spi_bits / 8 = 9 payload bytes + reset
@@ -897,7 +909,7 @@ mod tests {
     fn encode_output_len_matches_encoded_len() {
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(3);
+        let pixel_count = 3;
         let pixels = [
             Rgb::new(255, 0, 0),
             Rgb::new(0, 255, 0),
@@ -905,38 +917,62 @@ mod tests {
         ];
         let mut out: HVec<u8, 256> = HVec::new();
 
-        codec.encode(&config, &pixels, &mut out).unwrap();
+        codec
+            .encode(pixel_count, RgbOrder::Grb, &pixels, &mut out)
+            .unwrap();
 
         assert_eq!(
             out.len(),
-            codec.encoded_len(&config),
+            codec.encoded_len(pixel_count),
             "output len must match encoded_len prediction"
         );
-    }
-
-    #[test]
-    fn encode_rejects_length_mismatch() {
-        let codec =
-            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(2);
-        let pixels = [Rgb::new(0, 0, 0)];
-        let mut out: HVec<u8, 64> = HVec::new();
-
-        let err = codec.encode(&config, &pixels, &mut out).unwrap_err();
-        assert!(matches!(err, LedStripError::InvalidLength { .. }));
     }
 
     #[test]
     fn encode_rejects_buffer_too_small() {
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(2);
+        let pixel_count = 2;
         let pixels = [Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)];
         // 2 pixels * 9 bytes = 18 + reset_bytes —need > 30, give only 5
         let mut out: HVec<u8, 5> = HVec::new();
 
-        let err = codec.encode(&config, &pixels, &mut out).unwrap_err();
+        let err = codec
+            .encode(pixel_count, RgbOrder::Grb, &pixels, &mut out)
+            .unwrap_err();
         assert!(matches!(err, LedStripError::BufferTooSmall { .. }));
+    }
+
+    #[test]
+    fn encode_rejects_pixel_count_mismatch() {
+        let codec =
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
+        let pixels = [Rgb::new(255, 0, 0), Rgb::new(0, 255, 0)];
+        let mut out: HVec<u8, 256> = HVec::new();
+
+        // pixel_count < pixels.len()
+        let err = codec
+            .encode(1, RgbOrder::Grb, &pixels, &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LedStripError::Operation(SpiEncodeError::PixelCountMismatch {
+                declared: 1,
+                actual: 2,
+            })
+        );
+
+        // pixel_count > pixels.len()
+        let err = codec
+            .encode(3, RgbOrder::Grb, &pixels, &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LedStripError::Operation(SpiEncodeError::PixelCountMismatch {
+                declared: 3,
+                actual: 2,
+            })
+        );
     }
 
     // ── invert_output tests ──────────────────────────────────────────
@@ -957,16 +993,15 @@ mod tests {
         let plan = SpiEncodingPlan::ws2812_3bit();
         let codec_normal = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap();
         let codec_inverted = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, true).unwrap();
-        let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::new(255, 0, 0)];
         let mut out_normal: HVec<u8, 128> = HVec::new();
         let mut out_inverted: HVec<u8, 128> = HVec::new();
 
         codec_normal
-            .encode(&config, &pixels, &mut out_normal)
+            .encode(1, RgbOrder::Grb, &pixels, &mut out_normal)
             .unwrap();
         codec_inverted
-            .encode(&config, &pixels, &mut out_inverted)
+            .encode(1, RgbOrder::Grb, &pixels, &mut out_inverted)
             .unwrap();
 
         // Same length
@@ -988,12 +1023,11 @@ mod tests {
         // is 0x92, 0x49, 0x24 (3 bytes per channel, GRB order, repeated).
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::BLACK];
         let mut out: HVec<u8, 128> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
+        codec.encode(1, RgbOrder::Grb, &pixels, &mut out).unwrap();
 
-        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        let payload_bytes = out.len() - codec.reset_bytes();
         // 3 channels * 3 bytes/channel = 9 payload bytes
         assert_eq!(payload_bytes, 9);
         let expected_cycle: [u8; 3] = [0x92, 0x49, 0x24];
@@ -1011,12 +1045,11 @@ mod tests {
     fn white_pixel_produces_all_one_patterns() {
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::WHITE];
         let mut out: HVec<u8, 128> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
+        codec.encode(1, RgbOrder::Grb, &pixels, &mut out).unwrap();
 
-        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        let payload_bytes = out.len() - codec.reset_bytes();
         assert_eq!(payload_bytes, 9);
         let expected_cycle: [u8; 3] = [0xDB, 0x6D, 0xB6];
         for (i, &b) in out[..payload_bytes].iter().enumerate() {
@@ -1034,12 +1067,11 @@ mod tests {
         // Rgb(0,255,0) in GRB order: G=255 (ones), R=0 (zeros), B=0 (zeros)
         let codec =
             SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap();
-        let config = LedStripConfig::ws2812b(1);
         let pixels = [Rgb::new(0, 255, 0)];
         let mut out: HVec<u8, 128> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
+        codec.encode(1, RgbOrder::Grb, &pixels, &mut out).unwrap();
 
-        let payload_bytes = out.len() - codec.reset_bytes_for(&config);
+        let payload_bytes = out.len() - codec.reset_bytes();
         assert_eq!(payload_bytes, 9);
         // Channel 1 (G): ones pattern
         let ones: [u8; 3] = [0xDB, 0x6D, 0xB6];
@@ -1183,17 +1215,19 @@ mod tests {
 
     // ── Other protocol encodings ─────────────────────────────────────
 
-    use crate::Ws2816;
+    use crate::{Rgb16Order, RgbwOrder, Ws2816};
 
     #[test]
     fn encode_sk6812_produces_correct_length() {
         let codec =
             SpiCodec::<Rgbw, Sk6812>::for_protocol(SpiEncodingPlan::sk6812_4bit(), false).unwrap();
-        let config = LedStripConfig::sk6812(2);
+        let pixel_count = 2;
         let pixels = [Rgbw::new(0, 0, 0, 0), Rgbw::new(0, 0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
-        assert_eq!(out.len(), codec.encoded_len(&config));
+        codec
+            .encode(pixel_count, RgbwOrder::Grbw, &pixels, &mut out)
+            .unwrap();
+        assert_eq!(out.len(), codec.encoded_len(pixel_count));
     }
 
     #[test]
@@ -1201,11 +1235,13 @@ mod tests {
         // 8-bit symbols at 3.2 MHz -- all edges within +/-150 ns of WS2811 spec.
         let codec =
             SpiCodec::<Rgb, Ws2811>::for_protocol(SpiEncodingPlan::ws2811_8bit(), false).unwrap();
-        let config = LedStripConfig::ws2811(2);
+        let pixel_count = 2;
         let pixels = [Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
-        assert_eq!(out.len(), codec.encoded_len(&config));
+        codec
+            .encode(pixel_count, RgbOrder::Rgb, &pixels, &mut out)
+            .unwrap();
+        assert_eq!(out.len(), codec.encoded_len(pixel_count));
     }
 
     #[test]
@@ -1213,11 +1249,13 @@ mod tests {
         // 4 MHz, 4-bit: spi_bit=250, all edges within +/-150 ns of WS2816 spec.
         let plan = SpiEncodingPlan::new(4_000_000, 0b1000, 0b1100, 4);
         let codec = SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap();
-        let config = LedStripConfig::ws2816(1);
+        let pixel_count = 1;
         let pixels = [Rgb16::new(0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
-        codec.encode(&config, &pixels, &mut out).unwrap();
-        assert_eq!(out.len(), codec.encoded_len(&config));
+        codec
+            .encode(pixel_count, Rgb16Order::Grb, &pixels, &mut out)
+            .unwrap();
+        assert_eq!(out.len(), codec.encoded_len(pixel_count));
     }
 
     // ── Extra reset_ns ───────────────────────────────────────────────
@@ -1228,9 +1266,9 @@ mod tests {
         let plan_extra = SpiEncodingPlan::ws2812_3bit().with_extra_reset_ns(100_000);
         let codec_normal = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan_normal, false).unwrap();
         let codec_extra = SpiCodec::<Rgb, Ws2812B>::for_protocol(plan_extra, false).unwrap();
-        let config = LedStripConfig::ws2812b(1);
-        let len_normal = codec_normal.encoded_len(&config);
-        let len_extra = codec_extra.encoded_len(&config);
+        let pixel_count = 1;
+        let len_normal = codec_normal.encoded_len(pixel_count);
+        let len_extra = codec_extra.encoded_len(pixel_count);
         assert!(
             len_extra > len_normal,
             "extra reset should increase encoded length"
@@ -1306,6 +1344,18 @@ mod tests {
                 bits_per_symbol: 3,
             }
         ));
+    }
+
+    #[test]
+    fn encode_error_display_pixel_count_mismatch() {
+        let s = SpiEncodeError::PixelCountMismatch {
+            declared: 5,
+            actual: 3,
+        }
+        .to_string();
+        assert!(s.contains("pixel count mismatch"), "{s}");
+        assert!(s.contains("declared=5"), "{s}");
+        assert!(s.contains("actual=3"), "{s}");
     }
 
     #[test]

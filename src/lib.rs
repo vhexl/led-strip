@@ -22,36 +22,30 @@
 //! # Quick start
 //!
 //! ```ignore
-//! use led_strip::{LedStrip, LedStripConfig, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, Ws2812B};
+//! use led_strip::{LedStrip, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, RgbOrder, Ws2812B};
 //!
-//! let config = LedStripConfig::ws2812b(60);
 //! let codec = SpiCodec::<Rgb, Ws2812B>::for_protocol(
 //!     SpiEncodingPlan::ws2812_3bit(), false
 //! )?;
 //! let backend = SpiBackend::new(spi_peripheral);
-//! let mut strip: LedStrip<Rgb, Ws2812B, _, _, 64, 256> =
-//!     LedStrip::new(config, codec, backend)?;
+//! let mut strip: LedStrip<Rgb, Ws2812B, _, _, 256> =
+//!     LedStrip::new(RgbOrder::Grb, codec, backend);
 //!
-//! strip.set(0, Rgb::new(255, 0, 0))?;
-//! strip.refresh()?;
+//! let pixels = [Rgb::new(255, 0, 0); 60];
+//! strip.write(&pixels)?;
 //! ```
 
 #![cfg_attr(not(test), no_std)]
 
 mod api;
-mod config;
 mod error;
-mod frame;
 mod pixel;
 mod protocol;
 #[cfg(feature = "spi")]
 mod spi;
 
 pub use api::{LedStrip, RefreshError, TransportBackend, WireCodec};
-pub use config::LedStripConfig;
 pub use error::{LedStripError, LedStripResult};
-pub use frame::FrameBuf;
-pub use frame::FrameError;
 pub use pixel::{LedPixel, PixelKind, Rgb, Rgb16, Rgb16Order, RgbOrder, Rgbw, RgbwOrder};
 pub use protocol::{BitOrder, PulseTiming, SingleWireProtocol, Sk6812, Ws2811, Ws2812B, Ws2816};
 #[cfg(feature = "spi")]
