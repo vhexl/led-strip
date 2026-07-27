@@ -1,6 +1,6 @@
 [package]
 name         = "led-strip"
-version      = "0.1.1"
+version      = "0.2.0"
 edition      = "2024"
 rust-version = "1.88"
 description  = "no_std driver for WS2812/SK6812/WS2811/WS2816 single-wire addressable LED strips"
