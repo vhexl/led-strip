@@ -1,6 +1,6 @@
 # led-strip Driver Architecture
 
-> **Version**: 0.1.0 &emsp; **Edition**: Rust 2024 &emsp; **MSRV**: 1.88
+> **Version**: 0.2.0 &emsp; **Edition**: Rust 2024 &emsp; **MSRV**: 1.88
 
 ## 1. Overview
 
@@ -13,7 +13,7 @@ time — zero heap, zero alloc.
 | Pillar | Realization |
 |---|---|
 | **Zero-cost abstraction** | Generic `<P, Proto, Codec, Backend>` monomorphized per strip instance; no dyn dispatch |
-| **Compile-time safety** | Capacity checks in `LedStrip::new`; `<pixel, protocol>` mismatch rejected at compile time |
+| **Compile-time safety** | `<pixel, protocol>` mismatch rejected at compile time; TX_CAPACITY checked on each write |
 | **Extensible backend** | `WireCodec`/`TransportBackend` traits are protocol- and peripheral-agnostic |
 | **Branch-free hot path** | SPI patterns are pre-computed at construction; `encode` loop is a tight bit-packing kernel |
 
@@ -24,39 +24,36 @@ time — zero heap, zero alloc.
 ```mermaid
 flowchart LR
     subgraph User
-        A["set / write / fill / clear"]
+        A["write(&[P])"]
     end
 
     subgraph LedStrip
         direction TB
-        B["FrameBuf&lt;P, MAX_LEDS&gt;"]
-        C["LedStripConfig&lt;P, Proto&gt;"]
-        D["tx_buf: Vec&lt;Word, TX_CAPACITY&gt;"]
+        B["color_order: P::Order"]
+        C["tx_buf: Vec&lt;Word, TX_CAPACITY&gt;"]
     end
 
     subgraph Codec["WireCodec Layer"]
-        E["SpiCodec<br/>(pre-computed patterns)"]
+        D["SpiCodec<br/>(pre-computed patterns)"]
     end
 
     subgraph Backend["TransportBackend Layer"]
-        F["SpiBackend&lt;SPI&gt;"]
+        E["SpiBackend&lt;SPI&gt;"]
     end
 
     subgraph Hardware
-        G["SPI MOSI → LED Strip"]
+        F["SPI MOSI → LED Strip"]
     end
 
-    A --> B
-    B -->|"pixels &[P]"| E
-    C -->|"len, color_order"| E
-    E -->|"encoded &[u8]"| D
-    D -->|"&[Word]"| F
-    F -->|"SpiBus::write"| G
+    A -->|"pixels, color_order"| D
+    D -->|"encoded &[u8]"| C
+    C -->|"&[Word]"| E
+    E -->|"SpiBus::write"| F
 ```
 
 **Pipeline**:
-1. User mutates `FrameBuf` via `set`/`write`/`fill`/`clear`.
-2. `refresh()` calls `Codec::encode(pixels) → tx_buf`, producing a stream of transport words (SPI bytes).
+1. User calls `write(pixels)` with a dynamic-length pixel slice.
+2. `LedStrip::write()` calls `Codec::encode(color_order, pixels, &mut tx_buf)`.
 3. `Backend::transmit(tx_buf)` pushes the byte stream to the peripheral.
 4. The codec appends **reset (latch) fill bytes** at the end — the backend is oblivious to protocol timing.
 
@@ -71,8 +68,6 @@ flowchart LR
 | `protocol.rs` | `SingleWireProtocol` trait + 4 protocol markers | `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`, `BitOrder`, `PulseTiming` |
 | `pixel.rs` | `LedPixel` trait + 3 pixel types + color-order enums | `Rgb`, `Rgbw`, `Rgb16`, `RgbOrder`, `RgbwOrder`, `Rgb16Order` |
 | `spi.rs` | SPI codec (bit-banging encoder) + SPI backend | `SpiCodec`, `SpiBackend`, `SpiEncodingPlan`, `TimingEdge`, `SpiCodecPlanError` |
-| `config.rs` | `LedStripConfig` with convenience constructors | `LedStripConfig` |
-| `frame.rs` | Heap-less frame buffer | `FrameBuf`, `FrameError` |
 | `error.rs` | Unified error type | `LedStripError`, `LedStripResult` |
 
 ### Feature Gates
@@ -134,21 +129,21 @@ Each protocol is a **zero-sized marker type** that encodes datasheet constants a
 ```rust
 pub trait WireCodec<P: LedPixel, Proto: SingleWireProtocol<P>, Word: Copy> {
     type Error;
-    type EncodeError;  // separated from Error; SpiCodec::EncodeError = Infallible
+    type EncodeError;  // separated from Error; SpiCodec::EncodeError = SpiEncodeError
 
-    fn encoded_len(&self, config: &LedStripConfig<P, Proto>) -> usize;
+    fn encoded_len(&self, pixel_count: usize) -> usize;
     fn encode<const TX_CAPACITY: usize>(
         &self,
-        config: &LedStripConfig<P, Proto>,
+        color_order: P::Order,
         pixels: &[P],
         out: &mut Vec<Word, TX_CAPACITY>,
     ) -> LedStripResult<(), Self::EncodeError>;
 }
 ```
 
-- `encoded_len` **must** return the exact byte count `encode` will produce (including reset). Used for capacity pre-check in `LedStrip::new`.
+- `encoded_len` **must** return the exact byte count `encode` will produce (including reset). Used for capacity pre-check in `encode`.
 - `encode` writes into a caller-supplied `heapless::Vec` — no allocation.
-- `Error` (static) vs `EncodeError` (per-encode) separation: `SpiCodec` can only fail during construction, so `EncodeError = Infallible`.
+- `Error` (static) vs `EncodeError` (per-encode) separation: `SpiCodec::Error = SpiCodecPlanError` covers construction/validation failures; `SpiCodec::EncodeError = SpiEncodeError` covers encode-time failures (pixel-count mismatch, internal-consistency checks).
 
 ### 4.4 `TransportBackend` — Wire Transmission
 
@@ -165,21 +160,21 @@ Backends are **stateless** beyond the peripheral handle. The codec is responsibl
 
 ---
 
-## 5. `LedStrip` — High-Level Driver
+## 5. `LedStrip` — Stateless Driver
 
 ```rust
-pub struct LedStrip<P, Proto, Codec, Backend, const MAX_LEDS: usize, const TX_CAPACITY: usize>
+pub struct LedStrip<P, Proto, Codec, Backend, const TX_CAPACITY: usize>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
     Codec: WireCodec<P, Proto, Backend::Word>,
     Backend: TransportBackend,
 {
-    config: LedStripConfig<P, Proto>,
-    frame: FrameBuf<P, MAX_LEDS>,
+    color_order: P::Order,
     codec: Codec,
     backend: Backend,
     tx_buf: Vec<Backend::Word, TX_CAPACITY>,
+    _proto: PhantomData<Proto>,
 }
 ```
 
@@ -191,37 +186,26 @@ where
 | `Proto` | Protocol marker | `Ws2812B`, `Sk6812` |
 | `Codec` | Encoding scheme | `SpiCodec` |
 | `Backend` | Transport layer | `SpiBackend<MySpi>` |
-| `MAX_LEDS` | Max pixel count | `60` |
 | `TX_CAPACITY` | Max transport buffer (words) | `1024` |
 
 ### Public API
 
 | Method | Signature | Description |
 |---|---|---|
-| `new` | `(config, codec, backend) → Result<Self, …>` | Validates all capacities once |
-| `set` | `(index, pixel) → Result<(), …>` | Writes one pixel |
-| `write` | `(&[P]) → Result<(), …>` | Bulk-overwrites all pixels |
-| `fill` | `(pixel)` | Sets all pixels to same value |
-| `clear_pixels` | `()` | Resets frame to all-off |
-| `refresh` | `() → Result<(), …>` | Encodes + transmits frame |
-| `clear` | `() → Result<(), …>` | `clear_pixels()` + `refresh()` |
-| `len` / `is_empty` | `() → usize / bool` | Pixel count |
-| `config` | `() → &LedStripConfig` | Borrows config |
-| `into_parts` | `(self) → (Config, Codec, Backend)` | Destructure for reuse |
+| `new` | `(color_order, codec, backend) → Self` | Constructs driver (no capacity validation) |
+| `write` | `(&[P]) → Result<(), …>` | Encodes pixel slice and transmits to strip in one call |
+| `into_parts` | `(self) → (Codec, Backend)` | Destructure for reuse |
 
-### Capacity Guarantee
+### Capacity Model
 
-All capacity checks happen **once** in `new()`:
+Capacity checks happen on each `write()` call:
 
 ```rust
-// Check 1: pixel count fits in frame buffer
-if config.len() > MAX_LEDS { return Err(BufferTooSmall); }
-
-// Check 2: encoded transport buffer fits
-if codec.encoded_len(&config) > TX_CAPACITY { return Err(BufferTooSmall); }
+// Encoded_len validates that pixel_count fits in TX_CAPACITY
+// If it doesn't, encode returns BufferTooSmall
 ```
 
-If `new` returns `Ok`, subsequent `refresh`/`set`/`write` will **never** fail with `BufferTooSmall` on the hot path.
+The `encoded_len` method returns the exact word count needed for `pixel_count` pixels (payload + reset). `write()` checks this against `TX_CAPACITY` before encoding — the error path is cold but provides a safe panic-free fallback.
 
 ---
 
@@ -329,104 +313,54 @@ This catches mismatches like plugging a WS2812B plan into an SK6812 strip at con
 
 ```mermaid
 flowchart TD
-    A["LedStripError&lt;E&gt;"] --> B["InvalidIndex"]
-    A --> C["InvalidLength { expected, actual }"]
-    A --> D["BufferTooSmall { required, capacity }"]
-    A --> E["Operation(E)"]
+    A["LedStripError&lt;E&gt;"] --> B["BufferTooSmall { required, capacity }"]
+    A --> C["Operation(E)"]
 
-    F["RefreshError&lt;CodecErr, BackendErr&gt;"] --> G["Codec(CodecErr)"]
-    F --> H["Backend(BackendErr)"]
+    D["RefreshError&lt;CodecErr, BackendErr&gt;"] --> E["Codec(CodecErr)"]
+    D --> F["Backend(BackendErr)"]
 
-    I["FrameError"] --> J["InvalidIndex"]
-    I --> K["InvalidLength"]
-    I --> L["BufferTooSmall"]
+    G["SpiCodecPlanError"] --> H["ZeroClock"]
+    G --> I["ZeroBitsPerSymbol"]
+    G --> J["BitsPerSymbolTooWide"]
+    G --> K["PatternOutOfRange"]
+    G --> L["InvalidSymbolWaveform"]
+    G --> M["TimingOutOfTolerance"]
 
-    M["SpiCodecPlanError"] --> N["ZeroClock"]
-    M --> O["ZeroBitsPerSymbol"]
-    M --> P["BitsPerSymbolTooWide"]
-    M --> Q["PatternOutOfRange"]
-    M --> R["TimingOutOfTolerance"]
-
-    I -.->|"From impl"| A
+    N["SpiEncodeError"] --> O["InternalConsistency"]
 
     style A fill:#f9f,stroke:#333
-    style F fill:#bbf,stroke:#333
-    style I fill:#bfb,stroke:#333
-    style M fill:#fbb,stroke:#333
+    style D fill:#bbf,stroke:#333
+    style G fill:#fbb,stroke:#333
+    style N fill:#bfb,stroke:#333
 ```
 
-### Error flow in `refresh()`:
+### Error flow in `write()`:
 
 1. `Codec::encode` returns `LedStripResult<(), EncodeError>`.
-2. Structural errors (`InvalidIndex`, `InvalidLength`, `BufferTooSmall`) propagate directly.
+2. `BufferTooSmall` errors propagate directly from capacity checks.
 3. Codec-specific errors (`Operation(EncodeError)`) are wrapped into `RefreshError::Codec`.
 4. `Backend::transmit` errors are wrapped into `RefreshError::Backend`.
-5. The caller sees `LedStripError<RefreshError<Codec::EncodeError, Backend::Error>>`.
-
-### `FrameError` → `LedStripError` Conversion
-
-```rust
-impl From<FrameError> for LedStripError<Infallible> { … }
-```
-
-`FrameError` carries no `Operation` variant, so the conversion targets `LedStripError<Infallible>`. The `convert()` method widens `Infallible` to any `E` for use in generic contexts.
+5. `map_operation` allows wrapping codec/backend errors into `RefreshError` while preserving structural variants.
 
 ---
 
-## 8. Configuration & Frame Buffer
-
-### `LedStripConfig<P, Proto>`
-
-A compile-time-verified `<pixel, protocol>` pair with runtime pixel count and color order.
-
-```rust
-// Standard constructors (use protocol defaults)
-LedStripConfig::ws2812b(60)   // GRB, 60 pixels
-LedStripConfig::ws2811(100)   // RGB, 100 pixels
-LedStripConfig::sk6812(30)    // GRBW, 30 pixels
-LedStripConfig::ws2816(10)    // GRB, 10 pixels (16-bit)
-
-// Custom color order
-LedStripConfig::<Rgb, Ws2812B>::new(60, RgbOrder::Rgb)
-```
-
-### `FrameBuf<P, MAX_LEDS>`
-
-Heap-less pixel buffer backed by `heapless::Vec<P, MAX_LEDS>`. All pixels initialized to `P::default()` (all-off).
-
-| Method | Behavior |
-|---|---|
-| `set(idx, pixel)` | Bounds-checked single-pixel write |
-| `write(&[P])` | Bulk overwrite, length must match |
-| `fill(pixel)` | Sets every pixel to `pixel` |
-| `clear()` | Resets all to `P::default()` |
-| `as_slice()` / `as_mut_slice()` | Raw access |
-
----
-
-## 9. Complete Data Flow: `fill` + `refresh`
+## 8. Data Flow: `write(pixels)`
 
 ```mermaid
 sequenceDiagram
     participant User
     participant LedStrip
-    participant FrameBuf
     participant SpiCodec
     participant tx_buf
     participant SpiBackend
     participant SPI as SPI Peripheral
     participant Strip as LED Strip
 
-    User->>LedStrip: fill(Rgb::new(255, 0, 0))
-    LedStrip->>FrameBuf: fill(red)
-    FrameBuf-->>LedStrip: (all pixels = red)
-
-    User->>LedStrip: refresh()
-    LedStrip->>SpiCodec: encode(config, pixels, &mut tx_buf)
+    User->>LedStrip: write(&[Rgb::new(255,0,0); 60])
+    LedStrip->>SpiCodec: encode(60, Grb, pixels, &mut tx_buf)
     SpiCodec->>SpiCodec: for each pixel byte:<br/>lookup 0/1 pattern<br/>bit-pack into SPI bytes
     SpiCodec->>tx_buf: append reset fill bytes
     SpiCodec-->>LedStrip: Ok(())
-
     LedStrip->>SpiBackend: transmit(tx_buf.as_slice())
     SpiBackend->>SPI: spi.write(&[u8])
     SPI-->>Strip: MOSI → DIN (all pixels + latch)
@@ -436,20 +370,14 @@ sequenceDiagram
 
 ---
 
-## 10. Capacity Planning
+## 9. Capacity Planning
 
-The two const generics require upfront sizing:
-
-### `MAX_LEDS`
-```
-MAX_LEDS ≥ config.len()
-```
-Simple: must fit the pixel count.
+The single const generic requires upfront sizing:
 
 ### `TX_CAPACITY`
 
 ```
-TX_CAPACITY ≥ ceil(frame_bytes × 8 × bits_per_symbol / 8) + reset_bytes
+TX_CAPACITY ≥ ceil(pixel_count × bytes_per_pixel × 8 × bits_per_symbol / 8) + reset_bytes
 ```
 
 **Examples** (ws281x_3bit, 2.4 MHz):
@@ -465,7 +393,7 @@ For SK6812 (4-bit, 3.2 MHz), multiply payload by 4/3 and add larger reset:
 |---|---|
 | 60 | ~990 |
 
-**Rule of thumb**: `TX_CAPACITY = MAX_LEDS × 10` for ws281x_3bit, `MAX_LEDS × 17` for sk6812_4bit — then round up to the nearest power of 2 for headroom.
+**Rule of thumb**: `TX_CAPACITY = max_pixel_count × 10` for ws281x_3bit, `max_pixel_count × 17` for sk6812_4bit — then round up to the nearest power of 2 for headroom.
 
 ---
 
@@ -506,7 +434,7 @@ To add a new backend:
 3. Gate behind a Cargo feature (`rmt`, `pio`).
 4. Add `#[cfg(feature = "…")]` module + re-export in `lib.rs`.
 
-No changes to `LedStrip`, `FrameBuf`, `LedStripConfig`, or the protocol/pixel layers are needed — the generic design absorbs new backends transparently.
+No changes to `LedStrip` or the protocol/pixel layers are needed — the generic design absorbs new backends transparently.
 
 ---
 
@@ -514,22 +442,20 @@ No changes to `LedStrip`, `FrameBuf`, `LedStripConfig`, or the protocol/pixel la
 
 All tests are `#[cfg(test)]` inline unit tests — no external test harness required.
 
-| Module | Test Count | Coverage (regions) | Key Coverage |
-|---|---|---|---|
-| `api.rs` | 20 | 95.6% | `RefreshError` Display/Error, `LedStrip` full lifecycle (new/set/write/fill/refresh/clear/into_parts/Debug), both capacity checks (MAX_LEDS + TX_CAPACITY), `lift_frame_error` |
-| `config.rs` | 6 | **100.0%** | All 4 convenience constructors, custom color order, all getters, is_empty |
-| `error.rs` | 10 | 99.4% | Display for all variants, `Error::source()`, `From<E>`, `From<FrameError>` all branches, `convert()` widening |
-| `frame.rs` | 19 | 99.7% | Construction (new/from_config), set/write/fill/clear, as_slice/as_mut_slice, Clone, all FrameError Display/Error |
-| `pixel.rs` | 20 | **100.0%** | All 3 pixel types: constructors, BLACK/WHITE, Default, all color-order encode paths, KIND, BYTES_PER_PIXEL |
-| `spi.rs` | 37 | 95.1% | Timing validation (pass/fail/boundary/cross-protocol), all 4 protocol encodings, encode round-trip, invert_output, extra_reset_ns, plan getters, SpiCodec::new, SpiBackend (new/inner/into_inner/inner_mut/transmit via mock SPI), all 5 plan validation error paths |
-| **Total** | **113** | **97.0%** | |
+| Module | Test Count | Key Coverage |
+|---|---|---|
+| `api.rs` | 9 | `RefreshError` Display/Error, `LedStrip` lifecycle (new/write/into_parts/Debug), `BufferTooSmall` check, zero-pixel reset |
+| `error.rs` | 8 | Display for all variants, `Error::source()`, `From<E>`, `convert()` widening, `map_operation` both branches |
+| `pixel.rs` | 20 | All 3 pixel types: constructors, BLACK/WHITE, Default, all color-order encode paths, KIND, BYTES_PER_PIXEL |
+| `spi.rs` | 38 | Timing validation (pass/fail/boundary/cross-protocol), all 4 protocol encodings, encode round-trip, invert_output, extra_reset_ns, plan getters, SpiCodec::new, SpiBackend (new/inner/into_inner/inner_mut/transmit via mock SPI), all 5 plan validation error paths |
+| **Total** | **75** | |
 
-The remaining 3.0% uncovered regions are all in **unreachable paths** (safety nets and future-extension branches):
+The remaining uncovered regions are all in **unreachable paths** (safety nets and future-extension branches):
 
 | File | Unreachable Paths |
 |---|---|
-| `spi.rs` | Overflow branches in `encoded_len` / `reset_bytes_for` (billions of pixels needed), cold push/resize error paths after capacity pre-check, `bit_shift` LsbFirst (no protocol uses it) |
-| `api.rs` | `refresh()` encode-error mapping arms (all pre-validated in `new()`), `lift_frame_error` BufferTooSmall branch (never produced by FrameBuf after construction check) |
+| `spi.rs` | Overflow branches in `encoded_len` / `reset_bytes` (billions of pixels needed), cold push/resize error paths after capacity pre-check, `bit_shift` LsbFirst (no protocol uses it) |
+| `api.rs` | `write()` encode-error mapping arms (all pre-validated by `encoded_len` capacity check) |
 | `error.rs` | `Display` for `LedStripError<Infallible>` operation variant (infallible, never constructed) |
 
 These paths exist as safety nets (e.g., overflow returns `usize::MAX` to fail the capacity check gracefully) and for future protocol support.
@@ -557,4 +483,4 @@ No other runtime dependencies. `no_std` compatible (except test builds).
 - **`From` impls** for error conversions to avoid boilerplate `map_err` chains.
 - **Sealed trait** pattern on `LedPixel` to prevent downstream impls.
 - **Zero-sized protocol markers** — no runtime cost, all dispatch via monomorphization.
-- **Separated error types**: `Error` (static/construction) ≠ `EncodeError` (per-operation), so `SpiCodec::EncodeError = Infallible` and the compiler eliminates dead error-handling branches.
+- **Separated error types**: `Error` (static/construction) ≠ `EncodeError` (per-operation). This allows codecs that never fail at encode time to use `EncodeError = Infallible` (dead branches eliminated by the compiler), while codecs like `SpiCodec` that perform runtime validation (pixel-count mismatch, capacity edge-cases) use a concrete `EncodeError` type.

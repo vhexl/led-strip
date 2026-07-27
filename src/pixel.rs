@@ -1,5 +1,6 @@
 /// Discriminant for the three supported pixel formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PixelKind {
     /// 3-channel 8-bit RGB.
     Rgb,
@@ -11,6 +12,7 @@ pub enum PixelKind {
 
 /// Wire-level byte order for 8-bit RGB pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RgbOrder {
     /// Red, Green, Blue.
     Rgb,
@@ -20,6 +22,7 @@ pub enum RgbOrder {
 
 /// Wire-level byte order for 8-bit RGBW pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RgbwOrder {
     /// Red, Green, Blue, White.
     Rgbw,
@@ -29,6 +32,7 @@ pub enum RgbwOrder {
 
 /// Wire-level byte order for 16-bit RGB pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rgb16Order {
     /// Red, Green, Blue (big-endian per channel).
     Rgb,
