@@ -153,7 +153,8 @@ impl core::fmt::Display for TimingEdge {
 }
 
 /// Errors returned when constructing a [`SpiCodec`] or validating an
-/// [`SpiEncodingPlan`] against a protocol's timing tolerances.
+/// [`SpiEncodingPlan`] against a protocol's timing tolerances and
+/// reset-duration arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpiCodecPlanError {
@@ -175,6 +176,15 @@ pub enum SpiCodecPlanError {
         actual_ns: u32,
         expected_ns: u32,
         tolerance_ns: u32,
+    },
+    /// Reset duration × SPI clock exceeds the `u64` fixed-point range used
+    /// to compute reset byte counts.
+    ResetDurationOverflow {
+        /// Total requested reset duration in nanoseconds
+        /// (`Proto::RESET_NS + extra_reset_ns`).
+        total_reset_ns: u64,
+        /// SPI clock frequency in Hz.
+        spi_hz: u32,
     },
 }
 
@@ -211,6 +221,13 @@ impl core::fmt::Display for SpiCodecPlanError {
             } => write!(
                 f,
                 "timing out of tolerance: edge={edge} actual={actual_ns}ns expected={expected_ns}ns tolerance=\u{00B1}{tolerance_ns}ns"
+            ),
+            Self::ResetDurationOverflow {
+                total_reset_ns,
+                spi_hz,
+            } => write!(
+                f,
+                "invalid SPI plan: reset duration overflow: total_reset_ns={total_reset_ns}ns \u{00D7} spi_hz={spi_hz}Hz exceeds the u64 fixed-point range"
             ),
         }
     }
@@ -285,16 +302,19 @@ where
     Proto: SingleWireProtocol<P>,
 {
     /// Constructs a codec from a plan. Validates the plan's structural
-    /// parameters (clock, symbol width, pattern range) but does **not**
-    /// check protocol timing. Use [`for_protocol`](Self::for_protocol) if
-    /// timing validation is desired.
+    /// parameters (clock, symbol width, pattern range) and rejects reset
+    /// durations whose fixed-point arithmetic would overflow, but does
+    /// **not** check protocol timing. Use [`for_protocol`](Self::for_protocol)
+    /// if timing validation is desired.
     #[must_use = "SPI codec construction validates the plan; ignoring the result would silently drop errors"]
     pub fn new(plan: SpiEncodingPlan, invert_output: bool) -> Result<Self, SpiCodecPlanError> {
         validate_plan(plan)?;
+        validate_reset_duration::<P, Proto>(&plan)?;
         Ok(Self::from_plan(plan, invert_output))
     }
 
-    /// Constructs a codec with both structural and protocol timing tolerance validation.
+    /// Constructs a codec with structural, protocol timing tolerance, and
+    /// reset-duration overflow validation.
     ///
     /// Preferred over [`Self::new`] when the target protocol is known at construction time.
     /// Returns [`SpiCodecPlanError::TimingOutOfTolerance`] if any of the four timing edges
@@ -306,6 +326,7 @@ where
     ) -> Result<Self, SpiCodecPlanError> {
         validate_plan(plan)?;
         validate_timing::<P, Proto>(&plan)?;
+        validate_reset_duration::<P, Proto>(&plan)?;
         Ok(Self::from_plan(plan, invert_output))
     }
 
@@ -343,6 +364,10 @@ where
     /// `Proto::RESET_NS + extra_reset_ns` at the current SPI clock rate.
     ///
     /// Uses ceiling division: `ceil(ns * spi_hz / 1e9)`.
+    ///
+    /// Overflow is impossible here: `validate_reset_duration` rejects at
+    /// construction time any plan whose fixed-point intermediate would
+    /// exceed `u64::MAX`, so plain arithmetic is safe.
     fn reset_bytes(&self) -> usize
     where
         P: LedPixel,
@@ -352,15 +377,11 @@ where
 
         // Fixed-point arithmetic: reset_ns × spi_hz gives scaled clock cycles
         // (in units of 10^9); dividing by 8 × 10^9 converts to SPI bytes in
-        // one step (cycles → seconds → bytes).
-        let Some(scaled_cycles) = total_reset_ns.checked_mul(u64::from(self.plan.spi_hz)) else {
-            // Overflow only at physically impossible parameters
-            // (multi-second reset at GHz clocks). Return a value that will
-            // fail the capacity check.
-            return usize::MAX;
-        };
+        // one step (cycles → seconds → bytes). See `validate_reset_duration`
+        // for the overflow guarantee covering the multiplication.
+        let scaled_cycles = total_reset_ns * u64::from(self.plan.spi_hz);
 
-        let total_bytes = scaled_cycles.saturating_add(8_000_000_000_u64 - 1) / 8_000_000_000_u64;
+        let total_bytes = scaled_cycles.div_ceil(8_000_000_000_u64);
 
         usize::try_from(total_bytes).unwrap_or(usize::MAX)
     }
@@ -371,30 +392,19 @@ where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
 {
-    type Error = SpiCodecPlanError;
     type EncodeError = SpiEncodeError;
 
     fn encoded_len(&self, pixel_count: usize) -> usize {
-        let Some(frame_bytes) = pixel_count.checked_mul(P::BYTES_PER_PIXEL) else {
-            return usize::MAX;
-        };
-
-        let Some(payload_bits) = frame_bytes
-            .checked_mul(8)
-            .and_then(|v| v.checked_mul(usize::from(self.plan.bits_per_symbol)))
-        else {
-            // Overflow —return a value that will fail the capacity check.
-            // In practice this path is unreachable on 32-bit+ platforms for any real
-            // LED strip (would require billions of pixels).
-            return usize::MAX;
-        };
-
+        // Saturating arithmetic: overflow (requiring billions of pixels)
+        // saturates to a value that still fails the capacity check in `encode`,
+        // so no explicit early-return branches are needed.
+        let frame_bytes = pixel_count.saturating_mul(P::BYTES_PER_PIXEL);
+        let payload_bits = frame_bytes
+            .saturating_mul(8)
+            .saturating_mul(usize::from(self.plan.bits_per_symbol));
         let payload_bytes = payload_bits.saturating_add(7) / 8;
         let total = payload_bytes.saturating_add(self.reset_bytes());
 
-        // Saturating arithmetic on a 32-bit (or wider) usize only triggers at
-        // millions of LEDs —far beyond any real strip.  Still, if it ever
-        // saturates, the capacity check above would silently pass.
         debug_assert!(
             total < usize::MAX / 2,
             "encoded_len overflowed: frame too large for usize"
@@ -427,7 +437,7 @@ where
 
             for byte in &raw[..P::BYTES_PER_PIXEL] {
                 for bit_index in 0..8 {
-                    let shift = bit_shift::<P, Proto>(bit_index);
+                    let shift = bit_shift(bit_index);
                     let bit_is_set = ((*byte >> shift) & 1) != 0;
                     let pattern = if bit_is_set {
                         self.one_pattern
@@ -447,25 +457,10 @@ where
             }
         }
 
-        // Defensive: flush any partial byte. In practice this branch is
-        // unreachable for all valid configurations because the total SPI
-        // bit count (frame_bytes × 8 × bits_per_symbol) is always a multiple
-        // of 8. The inversion fill (`u8::MAX >> used_bits`) is likewise
-        // never exercised by a real encoding path.
-        if used_bits != 0 {
-            if self.reset_fill != 0 {
-                current_byte |= u8::MAX >> used_bits;
-            }
-
-            out.push(current_byte).map_err(|_| {
-                LedStripError::Operation(SpiEncodeError::InternalConsistency {
-                    stage: "final_partial_byte_push",
-                    required,
-                    capacity: TX_CAPACITY,
-                    attempted_len: out.len().saturating_add(1),
-                })
-            })?;
-        }
+        // Invariant: the total encoded bit count is always a multiple of 8
+        // (BYTES_PER_PIXEL × 8 × bits_per_symbol × pixel_count), so `used_bits`
+        // is always 0 here. Any other value indicates a codec logic bug.
+        debug_assert_eq!(used_bits, 0, "total encoded bits must be a multiple of 8");
 
         let reset_bytes = self.reset_bytes();
         let target_len = out.len().saturating_add(reset_bytes);
@@ -579,20 +574,37 @@ fn validate_plan(plan: SpiEncodingPlan) -> Result<(), SpiCodecPlanError> {
     Ok(())
 }
 
-/// Returns the bit position within a pixel byte for the given logical bit index,
-/// respecting the protocol's `BIT_ORDER`.
+/// Rejects plans whose reset-duration fixed-point arithmetic would overflow
+/// `u64` in [`SpiCodec::reset_bytes`](crate::SpiCodec).
 ///
-/// With `MsbFirst`, bit 0 -> position 7, bit 1 -> position 6, ...
-/// With `LsbFirst`, bit 0 -> position 0, bit 1 -> position 1, ...
-fn bit_shift<P, Proto>(bit_index: u8) -> u8
+/// Must be called after `validate_plan`, which guarantees `spi_hz != 0`.
+/// With this guarantee, `reset_bytes` can use plain arithmetic.
+fn validate_reset_duration<P, Proto>(plan: &SpiEncodingPlan) -> Result<(), SpiCodecPlanError>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
 {
-    match Proto::BIT_ORDER {
-        crate::BitOrder::MsbFirst => 7 - bit_index,
-        crate::BitOrder::LsbFirst => bit_index,
+    // RESET_NS and extra_reset_ns are both u32, so the sum cannot overflow u64.
+    let total_reset_ns = u64::from(Proto::RESET_NS) + u64::from(plan.extra_reset_ns);
+
+    // `div_ceil` in `reset_bytes` has no additive intermediate, so the
+    // multiplication is the only step that can overflow.
+    if total_reset_ns > u64::MAX / u64::from(plan.spi_hz) {
+        return Err(SpiCodecPlanError::ResetDurationOverflow {
+            total_reset_ns,
+            spi_hz: plan.spi_hz,
+        });
     }
+
+    Ok(())
+}
+
+/// Returns the bit position within a pixel byte for the given logical bit index.
+/// All supported protocols transmit the most significant bit first, so
+/// bit 0 -> position 7, bit 1 -> position 6, and so on.
+#[inline]
+fn bit_shift(bit_index: u8) -> u8 {
+    7 - bit_index
 }
 
 /// Stream-oriented SPI bit-packing kernel.
@@ -863,6 +875,18 @@ mod tests {
         assert!(s.contains("832"), "{s}");
         assert!(s.contains("600"), "{s}");
         assert!(s.contains("150"), "{s}");
+    }
+
+    #[test]
+    fn plan_error_display_reset_duration_overflow() {
+        let s = SpiCodecPlanError::ResetDurationOverflow {
+            total_reset_ns: 4_295_017_295,
+            spi_hz: u32::MAX,
+        }
+        .to_string();
+        assert!(s.contains("reset duration overflow"), "{s}");
+        assert!(s.contains("4295017295"), "{s}");
+        assert!(s.contains("4294967295"), "{s}");
     }
 
     #[test]
@@ -1283,6 +1307,21 @@ mod tests {
             SpiCodecPlanError::InvalidSymbolWaveform {
                 pattern: 0b011,
                 bits_per_symbol: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_plan_rejects_reset_duration_overflow() {
+        // (RESET_NS + extra_reset_ns) × spi_hz ≈ 1.84e19 exceeds the u64
+        // fixed-point range, so `reset_bytes` would overflow without this check.
+        let plan = SpiEncodingPlan::new(u32::MAX, 0b100, 0b110, 3).with_extra_reset_ns(u32::MAX);
+        let err = SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err();
+        assert!(matches!(
+            err,
+            SpiCodecPlanError::ResetDurationOverflow {
+                total_reset_ns: 4_295_017_295,
+                spi_hz: u32::MAX,
             }
         ));
     }

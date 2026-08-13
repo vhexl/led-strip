@@ -1,15 +1,3 @@
-/// Discriminant for the three supported pixel formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PixelKind {
-    /// 3-channel 8-bit RGB.
-    Rgb,
-    /// 4-channel 8-bit RGBW (dedicated white channel).
-    Rgbw,
-    /// 3-channel 16-bit RGB (high dynamic range).
-    Rgb16,
-}
-
 /// Wire-level byte order for 8-bit RGB pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -51,8 +39,6 @@ pub enum Rgb16Order {
 pub trait LedPixel: Copy + Default + private::Sealed {
     type Order: Copy + Eq;
 
-    /// Discriminant for runtime pixel-format dispatch.
-    const KIND: PixelKind;
     /// Number of bytes this pixel occupies on the wire.
     const BYTES_PER_PIXEL: usize;
 
@@ -135,7 +121,6 @@ impl Rgb16 {
 impl LedPixel for Rgb {
     type Order = RgbOrder;
 
-    const KIND: PixelKind = PixelKind::Rgb;
     const BYTES_PER_PIXEL: usize = 3;
 
     fn encode(self, order: Self::Order, out: &mut [u8]) {
@@ -159,7 +144,6 @@ impl LedPixel for Rgb {
 impl LedPixel for Rgbw {
     type Order = RgbwOrder;
 
-    const KIND: PixelKind = PixelKind::Rgbw;
     const BYTES_PER_PIXEL: usize = 4;
 
     fn encode(self, order: Self::Order, out: &mut [u8]) {
@@ -185,7 +169,6 @@ impl LedPixel for Rgbw {
 impl LedPixel for Rgb16 {
     type Order = Rgb16Order;
 
-    const KIND: PixelKind = PixelKind::Rgb16;
     const BYTES_PER_PIXEL: usize = 6;
 
     fn encode(self, order: Self::Order, out: &mut [u8]) {
@@ -232,7 +215,7 @@ mod private {
 
 #[cfg(test)]
 mod tests {
-    use super::{LedPixel, PixelKind, Rgb, Rgb16, Rgb16Order, RgbOrder, Rgbw, RgbwOrder};
+    use super::{LedPixel, Rgb, Rgb16, Rgb16Order, RgbOrder, Rgbw, RgbwOrder};
 
     // ── Constructor & constants ──────────────────────────────────────
 
@@ -351,14 +334,7 @@ mod tests {
         assert_eq!(out, [0x33, 0x44, 0x11, 0x22, 0x55, 0x66]);
     }
 
-    // ── KIND & BYTES_PER_PIXEL ──────────────────────────────────────
-
-    #[test]
-    fn pixel_kind_discriminants() {
-        assert_eq!(Rgb::KIND, PixelKind::Rgb);
-        assert_eq!(Rgbw::KIND, PixelKind::Rgbw);
-        assert_eq!(Rgb16::KIND, PixelKind::Rgb16);
-    }
+    // ── BYTES_PER_PIXEL ─────────────────────────────────────────────
 
     #[test]
     fn bytes_per_pixel_values() {

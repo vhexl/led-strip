@@ -88,13 +88,11 @@ where
     Proto: SingleWireProtocol<P>,
     Word: Copy,
 {
-    /// Codec-level error type (construction, validation, etc.).
-    type Error;
-    /// Error type produced specifically by [`encode`](Self::encode).
+    /// Error type produced by [`encode`](Self::encode).
     ///
-    /// Separated from [`Error`](Self::Error) because some codecs (e.g.
-    /// [`SpiCodec`](crate::SpiCodec)) never fail during encoding —the
-    /// only possible error is `BufferTooSmall`.
+    /// For [`SpiCodec`](crate::SpiCodec) this is [`SpiEncodeError`](crate::SpiEncodeError),
+    /// which reports only internal-consistency failures (a codec logic bug)
+    /// rather than user-input errors such as buffer overflows.
     type EncodeError;
 
     /// Returns the exact number of `Word`s that [`encode`](Self::encode) will

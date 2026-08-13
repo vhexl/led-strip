@@ -61,19 +61,6 @@ impl<E> LedStripError<E> {
     }
 }
 
-impl LedStripError<core::convert::Infallible> {
-    /// Widens an infallible error into `LedStripError<E>`.
-    /// The `Operation` branch is unreachable because `Infallible` has no values.
-    pub fn convert<E>(self) -> LedStripError<E> {
-        match self {
-            Self::BufferTooSmall { required, capacity } => {
-                LedStripError::BufferTooSmall { required, capacity }
-            }
-            Self::Operation(never) => match never {},
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,22 +106,6 @@ mod tests {
             capacity: 0,
         };
         assert!(core::error::Error::source(&buf).is_none());
-    }
-
-    #[test]
-    fn convert_preserves_structural_variants() {
-        let c = LedStripError::BufferTooSmall {
-            required: 3,
-            capacity: 4,
-        };
-        let widened: LedStripError<DummyOp> = c.convert();
-        assert_eq!(
-            widened,
-            LedStripError::BufferTooSmall {
-                required: 3,
-                capacity: 4,
-            }
-        );
     }
 
     #[test]

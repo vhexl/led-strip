@@ -65,7 +65,7 @@ flowchart LR
 |---|---|---|
 | `lib.rs` | Crate root, module declarations, re-exports, doc overview | — |
 | `api.rs` | Core traits (`WireCodec`, `TransportBackend`) and `LedStrip` struct | `LedStrip`, `RefreshError` |
-| `protocol.rs` | `SingleWireProtocol` trait + 4 protocol markers | `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`, `BitOrder`, `PulseTiming` |
+| `protocol.rs` | `SingleWireProtocol` trait + 4 protocol markers | `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`, `PulseTiming` |
 | `pixel.rs` | `LedPixel` trait + 3 pixel types + color-order enums | `Rgb`, `Rgbw`, `Rgb16`, `RgbOrder`, `RgbwOrder`, `Rgb16Order` |
 | `spi.rs` | SPI codec (bit-banging encoder) + SPI backend | `SpiCodec`, `SpiBackend`, `SpiEncodingPlan`, `TimingEdge`, `SpiCodecPlanError` |
 | `error.rs` | Unified error type | `LedStripError`, `LedStripResult` |
@@ -87,7 +87,6 @@ The crate compiles without `spi` (for testing the core types), but no backend is
 ```rust
 pub trait LedPixel: Copy + Default + private::Sealed {
     type Order: Copy + Eq;          // RgbOrder | RgbwOrder | Rgb16Order
-    const KIND: PixelKind;          // runtime discriminant
     const BYTES_PER_PIXEL: usize;   // 3 | 4 | 6
     fn encode(self, order: Self::Order, out: &mut [u8]);
 }
@@ -106,7 +105,6 @@ The trait is **sealed** — downstream crates cannot add new pixel types. This e
 ```rust
 pub trait SingleWireProtocol<P: LedPixel> {
     const NAME: &'static str;
-    const BIT_ORDER: BitOrder;           // MsbFirst | LsbFirst
     const DEFAULT_COLOR_ORDER: P::Order;
     const RESET_NS: u32;
     const ZERO: PulseTiming;             // { high_ns, low_ns }
@@ -128,8 +126,7 @@ Each protocol is a **zero-sized marker type** that encodes datasheet constants a
 
 ```rust
 pub trait WireCodec<P: LedPixel, Proto: SingleWireProtocol<P>, Word: Copy> {
-    type Error;
-    type EncodeError;  // separated from Error; SpiCodec::EncodeError = SpiEncodeError
+    type EncodeError;  // SpiCodec::EncodeError = SpiEncodeError
 
     fn encoded_len(&self, pixel_count: usize) -> usize;
     fn encode<const TX_CAPACITY: usize>(
@@ -143,7 +140,7 @@ pub trait WireCodec<P: LedPixel, Proto: SingleWireProtocol<P>, Word: Copy> {
 
 - `encoded_len` **must** return the exact byte count `encode` will produce (including reset). Used for capacity pre-check in `encode`.
 - `encode` writes into a caller-supplied `heapless::Vec` — no allocation.
-- `Error` (static) vs `EncodeError` (per-encode) separation: `SpiCodec::Error = SpiCodecPlanError` covers construction/validation failures; `SpiCodec::EncodeError = SpiEncodeError` covers encode-time failures (pixel-count mismatch, internal-consistency checks).
+- `EncodeError` is the per-encode failure type: `SpiCodec::EncodeError = SpiEncodeError` reports internal-consistency failures (a codec logic bug). Construction/validation errors (`SpiCodecPlanError`) are returned by the inherent `SpiCodec::new` / `SpiCodec::for_protocol` constructors, not via the trait.
 
 ### 4.4 `TransportBackend` — Wire Transmission
 
@@ -227,10 +224,13 @@ pub struct SpiEncodingPlan {
 
 | Plan | SPI Clock | Symbol Width | Zero Pattern | One Pattern | Use Case |
 |---|---|---|---|---|---|
-| `ws281x_3bit()` | 2.4 MHz | 3 | `0b100` | `0b110` | WS2812B, WS2811 |
+| `ws2812_3bit()` | 2.4 MHz | 3 | `0b100` | `0b110` | WS2812B |
 | `sk6812_4bit()` | 3.2 MHz | 4 | `0b1000` | `0b1100` | SK6812 |
+| `ws2811_8bit()` | 3.2 MHz | 8 | `0b1100_0000` | `0b1111_0000` | WS2811 |
 
-**Timing Derivation** (example: ws281x_3bit @ 2.4 MHz):
+WS2816 (16-bit) uses a custom 4-bit plan (4 MHz, `0b1000`/`0b1100`) built via `SpiEncodingPlan::new`.
+
+**Timing Derivation** (example: ws2812_3bit @ 2.4 MHz):
 ```
 spi_bit_ns = 10⁹ / 2_400_000 ≈ 416 ns
 
@@ -261,10 +261,11 @@ for each pixel:
     pixel.encode(color_order) → raw bytes [b₀, b₁, …]
     for each byte:
         for bit_index in 0..8:
-            shift = msb_first ? (7 - bit_index) : bit_index
+            shift = 7 - bit_index               // all protocols are MSB-first
             pattern = (byte >> shift) & 1 ? one_pattern : zero_pattern
             append_pattern(out, pattern, bits_per_symbol)
-// flush partial byte
+// invariant: used_bits == 0 here — enforced by debug_assert_eq
+// (total encoded bits = BYTES_PER_PIXEL × 8 × bits_per_symbol × count ≡ 0 mod 8)
 append reset_fill bytes (calculated from RESET_NS + extra_reset_ns)
 ```
 
@@ -277,7 +278,8 @@ total_reset_ns = Proto::RESET_NS + plan.extra_reset_ns
 reset_bytes = ⌈total_reset_ns × spi_hz / (8 × 10⁹)⌉
 ```
 
-Uses ceiling division via `(scaled_cycles + 8e9 - 1) / 8e9` to avoid floating-point.
+Uses ceiling division via `scaled_cycles.div_ceil(8e9)` to avoid floating-point.
+Overflow is prevented at construction: `validate_reset_duration` rejects any plan whose fixed-point intermediate would exceed `u64::MAX` (`SpiCodecPlanError::ResetDurationOverflow`), so `reset_bytes` uses plain arithmetic.
 
 ### 6.5 `SpiBackend<SPI>`
 
@@ -288,7 +290,8 @@ impl<SPI: SpiBus<u8>> TransportBackend for SpiBackend<SPI> {
     type Word = u8;
     type Error = SPI::Error;
     fn transmit(&mut self, words: &[u8]) -> Result<(), SPI::Error> {
-        self.spi.write(words)
+        self.spi.write(words)?;
+        self.spi.flush()
     }
 }
 ```
@@ -380,7 +383,7 @@ The single const generic requires upfront sizing:
 TX_CAPACITY ≥ ceil(pixel_count × bytes_per_pixel × 8 × bits_per_symbol / 8) + reset_bytes
 ```
 
-**Examples** (ws281x_3bit, 2.4 MHz):
+**Examples** (ws2812_3bit, 2.4 MHz):
 
 | Pixels | Frame Bytes | Payload SPI Bytes | Reset Bytes | TX_CAPACITY (min) |
 |---|---|---|---|---|
@@ -393,7 +396,7 @@ For SK6812 (4-bit, 3.2 MHz), multiply payload by 4/3 and add larger reset:
 |---|---|
 | 60 | ~990 |
 
-**Rule of thumb**: `TX_CAPACITY = max_pixel_count × 10` for ws281x_3bit, `max_pixel_count × 17` for sk6812_4bit — then round up to the nearest power of 2 for headroom.
+**Rule of thumb**: `TX_CAPACITY = max_pixel_count × 10` for ws2812_3bit, `max_pixel_count × 17` for sk6812_4bit — then round up to the nearest power of 2 for headroom.
 
 ---
 
@@ -445,18 +448,18 @@ All tests are `#[cfg(test)]` inline unit tests — no external test harness requ
 | Module | Test Count | Key Coverage |
 |---|---|---|
 | `api.rs` | 9 | `RefreshError` Display/Error, `LedStrip` lifecycle (new/write/into_parts/Debug), `BufferTooSmall` check, zero-pixel reset |
-| `error.rs` | 8 | Display for all variants, `Error::source()`, `From<E>`, `convert()` widening, `map_operation` both branches |
-| `pixel.rs` | 20 | All 3 pixel types: constructors, BLACK/WHITE, Default, all color-order encode paths, KIND, BYTES_PER_PIXEL |
-| `spi.rs` | 38 | Timing validation (pass/fail/boundary/cross-protocol), all 4 protocol encodings, encode round-trip, invert_output, extra_reset_ns, plan getters, SpiCodec::new, SpiBackend (new/inner/into_inner/inner_mut/transmit via mock SPI), all 5 plan validation error paths |
-| **Total** | **75** | |
+| `error.rs` | 6 | Display for all variants, `Error::source()`, `From<E>`, `map_operation` both branches |
+| `pixel.rs` | 19 | All 3 pixel types: constructors, BLACK/WHITE, Default, all color-order encode paths, BYTES_PER_PIXEL |
+| `spi.rs` | 45 | Timing validation (pass/fail/boundary/cross-protocol), all 4 protocol encodings, encode round-trip, invert_output, extra_reset_ns, plan getters, SpiCodec::new, SpiBackend (new/inner/into_inner/inner_mut/transmit via mock SPI), all 6 plan validation error paths |
+| **Total** | **79** | |
 
 The remaining uncovered regions are all in **unreachable paths** (safety nets and future-extension branches):
 
 | File | Unreachable Paths |
 |---|---|
-| `spi.rs` | Overflow branches in `encoded_len` / `reset_bytes` (billions of pixels needed), cold push/resize error paths after capacity pre-check, `bit_shift` LsbFirst (no protocol uses it) |
+| `spi.rs` | Saturating-overflow fallback in `encoded_len` (billions of pixels needed), cold push/resize error paths after capacity pre-check, `debug_assert_eq!(used_bits, 0)` invariant |
 | `api.rs` | `write()` encode-error mapping arms (all pre-validated by `encoded_len` capacity check) |
-| `error.rs` | `Display` for `LedStripError<Infallible>` operation variant (infallible, never constructed) |
+| `error.rs` | `map_operation` `Operation` closure for `LedStripError<Infallible>` (infallible, never invoked) |
 
 These paths exist as safety nets (e.g., overflow returns `usize::MAX` to fail the capacity check gracefully) and for future protocol support.
 
@@ -483,4 +486,4 @@ No other runtime dependencies. `no_std` compatible (except test builds).
 - **`From` impls** for error conversions to avoid boilerplate `map_err` chains.
 - **Sealed trait** pattern on `LedPixel` to prevent downstream impls.
 - **Zero-sized protocol markers** — no runtime cost, all dispatch via monomorphization.
-- **Separated error types**: `Error` (static/construction) ≠ `EncodeError` (per-operation). This allows codecs that never fail at encode time to use `EncodeError = Infallible` (dead branches eliminated by the compiler), while codecs like `SpiCodec` that perform runtime validation (pixel-count mismatch, capacity edge-cases) use a concrete `EncodeError` type.
+- **Per-operation error type**: `EncodeError` is the only codec error type carried by the trait; construction/validation errors are returned by inherent constructors (`SpiCodec::new` / `SpiCodec::for_protocol`). Codecs that never fail at encode time can set `EncodeError = Infallible` (dead branches eliminated by the compiler via the never type), while `SpiCodec` uses `SpiEncodeError` for internal-consistency checks.

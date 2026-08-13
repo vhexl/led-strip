@@ -13,16 +13,6 @@ mod private {
     impl ProtocolSealed for Ws2816 {}
 }
 
-/// Bit transmission order within a byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum BitOrder {
-    /// Most significant bit first (WS2812-family default).
-    MsbFirst,
-    /// Least significant bit first.
-    LsbFirst,
-}
-
 /// High/low pulse widths for a single protocol bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PulseTiming {
@@ -33,7 +23,7 @@ pub struct PulseTiming {
 }
 
 /// Describes the wire-level electrical characteristics of a single-wire LED
-/// protocol (pulse timings, bit order, reset duration).
+/// protocol (pulse timings, reset duration).
 ///
 /// Each protocol is a zero-sized marker type (`Ws2812`, `Sk6812`, …) that
 /// implements this trait for the pixel formats it can drive. An incompatible
@@ -52,8 +42,6 @@ where
 {
     /// Human-readable protocol name (e.g. "WS2812B").
     const NAME: &'static str;
-    /// Bit transmission order within each byte.
-    const BIT_ORDER: BitOrder;
     /// Default on-wire color channel order for this protocol.
     const DEFAULT_COLOR_ORDER: P::Order;
     /// Minimum reset (latch) duration in nanoseconds.
@@ -88,7 +76,6 @@ pub struct Ws2816;
 
 impl SingleWireProtocol<Rgb> for Ws2812B {
     const NAME: &'static str = "WS2812B";
-    const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
     const DEFAULT_COLOR_ORDER: RgbOrder = RgbOrder::Grb;
     const RESET_NS: u32 = 50_000;
     const ZERO: PulseTiming = PulseTiming {
@@ -103,7 +90,6 @@ impl SingleWireProtocol<Rgb> for Ws2812B {
 
 impl SingleWireProtocol<Rgb> for Ws2811 {
     const NAME: &'static str = "WS2811";
-    const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
     const DEFAULT_COLOR_ORDER: RgbOrder = RgbOrder::Rgb;
     const RESET_NS: u32 = 50_000;
     // WS2811 uses 400 kbps slow-mode timing (≈ 2.5 µs per bit vs ≈ 1.25 µs for WS2812B).
@@ -120,7 +106,6 @@ impl SingleWireProtocol<Rgb> for Ws2811 {
 
 impl SingleWireProtocol<Rgbw> for Sk6812 {
     const NAME: &'static str = "SK6812";
-    const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
     const DEFAULT_COLOR_ORDER: RgbwOrder = RgbwOrder::Grbw;
     const RESET_NS: u32 = 80_000;
     const ZERO: PulseTiming = PulseTiming {
@@ -135,7 +120,6 @@ impl SingleWireProtocol<Rgbw> for Sk6812 {
 
 impl SingleWireProtocol<Rgb16> for Ws2816 {
     const NAME: &'static str = "WS2816";
-    const BIT_ORDER: BitOrder = BitOrder::MsbFirst;
     const DEFAULT_COLOR_ORDER: Rgb16Order = Rgb16Order::Grb;
     // 16-bit channels + color order shift → longer reset latch required.
     const RESET_NS: u32 = 300_000;
