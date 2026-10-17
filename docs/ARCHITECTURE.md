@@ -1,6 +1,6 @@
 # led-strip Driver Architecture
 
-> **Version**: 0.2.0 &emsp; **Edition**: Rust 2024 &emsp; **MSRV**: 1.88
+> **Version**: 0.3.0 + unreleased fixes &emsp; **Edition**: Rust 2024 &emsp; **MSRV**: 1.88
 
 ## 1. Overview
 
@@ -109,7 +109,12 @@ pub trait SingleWireProtocol<P: LedPixel> {
     const RESET_NS: u32;
     const ZERO: PulseTiming;             // { high_ns, low_ns }
     const ONE: PulseTiming;
-    const TIMING_TOLERANCE_NS: u32;      // default 150 ns
+    const TIMING_TOLERANCE_NS: u32;      // default 150 ns, used for default bounds
+    const ZERO_MIN: PulseTiming;
+    const ZERO_MAX: PulseTiming;
+    const ONE_MIN: PulseTiming;
+    const ONE_MAX: PulseTiming;
+    const MIN_BIT_PERIOD_NS: u32;        // default 0; WS2816B/C requires 1250 ns
 }
 ```
 
@@ -121,6 +126,13 @@ Each protocol is a **zero-sized marker type** that encodes datasheet constants a
 | `Ws2811` | `Rgb` | ~400 kbps | RGB | ≥50 µs |
 | `Sk6812` | `Rgbw` | ~800 kbps | GRBW | ≥80 µs |
 | `Ws2816` | `Rgb16` | ~800 kbps | GRB | ≥300 µs |
+
+The default phase bounds are derived from `ZERO`/`ONE` ± `TIMING_TOLERANCE_NS`.
+`Ws2816` specifically supports the WS2816B/C 48-bit GRB frame format and overrides
+these bounds with T0H=200–320 ns, T0L=800–1200 ns, T1H=520–800 ns, T1L=480–1000 ns.
+Both bit periods must be at least 1250 ns. These values follow the
+[Worldsemi WS2816B-2121 datasheet, page 4](https://www.tme.eu/Document/2bd0f26702fa63d599bec05f7e359338/WS2816B-2121.pdf).
+WS2816A gain-control frames are outside this marker's supported format.
 
 ### 4.3 `WireCodec<P, Proto, Word>` — Encoding Strategy
 
@@ -227,15 +239,18 @@ pub struct SpiEncodingPlan {
 | `ws2812_3bit()` | 2.4 MHz | 3 | `0b100` | `0b110` | WS2812B |
 | `sk6812_4bit()` | 3.2 MHz | 4 | `0b1000` | `0b1100` | SK6812 |
 | `ws2811_8bit()` | 3.2 MHz | 8 | `0b1100_0000` | `0b1111_0000` | WS2811 |
+| `ws2816_5bit()` | 4 MHz | 5 | `0b10000` | `0b11100` | WS2816B/C |
 
-WS2816 (16-bit) uses a custom 4-bit plan (4 MHz, `0b1000`/`0b1100`) built via `SpiEncodingPlan::new`.
+The WS2816B/C plan produces `(250,1000)` / `(750,500)` ns phases, with a 1250 ns
+bit period. It uses 30 payload bytes per pixel and 150 reset bytes at 4 MHz.
+The previous 4-bit plan did not meet the datasheet timing requirements.
 
 **Timing Derivation** (example: ws2812_3bit @ 2.4 MHz):
 ```
-spi_bit_ns = 10⁹ / 2_400_000 ≈ 416 ns
+spi_bit_ns = 10⁹ / 2_400_000 ≈ 416.667 ns
 
-zero_pattern = 0b100 → leading_ones = 1 → T0H = 1 × 416 = 416 ns, T0L = 2 × 416 = 833 ns
-one_pattern  = 0b110 → leading_ones = 2 → T1H = 2 × 416 = 833 ns, T1L = 1 × 416 = 416 ns
+zero_pattern = 0b100 → leading_ones = 1 → T0H ≈ 416.667 ns, T0L ≈ 833.333 ns
+one_pattern  = 0b110 → leading_ones = 2 → T1H ≈ 833.333 ns, T1L ≈ 416.667 ns
 ```
 
 ### 6.2 `SpiCodec`
@@ -300,15 +315,20 @@ Minimal wrapper — delegates directly to `embedded_hal::spi::SpiBus::write`. Pr
 
 ### 6.6 Timing Validation
 
-`validate_timing::<P, Proto>(plan)` checks all 4 edges against the protocol's `TIMING_TOLERANCE_NS` (±150 ns default):
+`validate_timing::<P, Proto>(plan)` checks all 4 phases against the protocol's
+explicit bounds, then checks `MIN_BIT_PERIOD_NS`. Comparisons use `u64`
+cross-products without rounding the SPI bit period:
 
 ```
 for each edge ∈ {T0H, T0L, T1H, T1L}:
-    if |actual_ns - expected_ns| > tolerance_ns:
-        return Err(TimingOutOfTolerance { edge, actual_ns, expected_ns, tolerance_ns })
+    require min_ns * spi_hz <= phase_bits * 1_000_000_000 <= max_ns * spi_hz
+require MIN_BIT_PERIOD_NS * spi_hz <= bits_per_symbol * 1_000_000_000
 ```
 
-This catches mismatches like plugging a WS2812B plan into an SK6812 strip at construction time.
+This catches mismatches like plugging a WS2812B plan into an SK6812 strip at
+construction time, and rejects WS2816 plans whose individual phases fit but whose
+bit period is too short. Rounding is used only for error display; large diagnostic
+durations may saturate to `u32::MAX`, without affecting the exact comparison.
 
 ---
 
@@ -443,25 +463,22 @@ No changes to `LedStrip` or the protocol/pixel layers are needed — the generic
 
 ## 12. Test Strategy
 
-All tests are `#[cfg(test)]` inline unit tests — no external test harness required.
+Tests include inline unit tests and an executable quick-start doctest.
 
-| Module | Test Count | Key Coverage |
-|---|---|---|
-| `api.rs` | 9 | `RefreshError` Display/Error, `LedStrip` lifecycle (new/write/into_parts/Debug), `BufferTooSmall` check, zero-pixel reset |
-| `error.rs` | 6 | Display for all variants, `Error::source()`, `From<E>`, `map_operation` both branches |
-| `pixel.rs` | 19 | All 3 pixel types: constructors, BLACK/WHITE, Default, all color-order encode paths, BYTES_PER_PIXEL |
-| `spi.rs` | 45 | Timing validation (pass/fail/boundary/cross-protocol), all 4 protocol encodings, encode round-trip, invert_output, extra_reset_ns, plan getters, SpiCodec::new, SpiBackend (new/inner/into_inner/inner_mut/transmit via mock SPI), all 6 plan validation error paths |
-| **Total** | **79** | |
-
-The remaining uncovered regions are all in **unreachable paths** (safety nets and future-extension branches):
-
-| File | Unreachable Paths |
+| Module | Key Coverage |
 |---|---|
-| `spi.rs` | Saturating-overflow fallback in `encoded_len` (billions of pixels needed), cold push/resize error paths after capacity pre-check, `debug_assert_eq!(used_bits, 0)` invariant |
-| `api.rs` | `write()` encode-error mapping arms (all pre-validated by `encoded_len` capacity check) |
-| `error.rs` | `map_operation` `Operation` closure for `LedStripError<Infallible>` (infallible, never invoked) |
+| `api.rs` | Generic error behavior without SPI; feature-gated `LedStrip` lifecycle, capacity checks and transmission |
+| `error.rs` | Display, error sources, conversions and error mapping |
+| `pixel.rs` | Constructors, defaults, channel order and 16-bit byte order |
+| `spi.rs` | Protocol bounds and period constraints, fractional timing boundaries, low-clock overflow, distinct symbols, encoding and backend behavior |
+| `lib.rs` | Quick-start example encodes and transmits 60 pixels within its buffer |
 
-These paths exist as safety nets (e.g., overflow returns `usize::MAX` to fail the capacity check gracefully) and for future protocol support.
+CI runs tests and strict documentation builds both with and without SPI, and
+Clippy includes test targets. Regression tests cover invalid and valid WS2816
+plans independently of the configured nominal timings.
+
+Measured coverage is recorded in each CI coverage report and uploaded to Codecov.
+Consult the report for the relevant revision when assessing uncovered lines or branches.
 
 ---
 

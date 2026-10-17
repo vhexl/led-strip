@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The [`WireCodec`] / [`TransportBackend`] traits are intentionally generic:
-//! [`SpiCodec`] / [`SpiBackend`] are the current production implementation,
+//! `SpiCodec` / `SpiBackend` are the current production implementation,
 //! but the trait design accommodates future backends (RMT, PIO, etc.) without
 //! API changes.
 //!
@@ -21,18 +21,37 @@
 //!
 //! # Quick start
 //!
-//! ```ignore
+//! ```
+//! # #[cfg(feature = "spi")]
+//! # {
+//! # use core::convert::Infallible;
+//! # use embedded_hal::spi::{ErrorType, SpiBus};
+//! # struct MockSpi;
+//! # impl ErrorType for MockSpi { type Error = Infallible; }
+//! # impl SpiBus<u8> for MockSpi {
+//! #     fn read(&mut self, _: &mut [u8]) -> Result<(), Self::Error> { Ok(()) }
+//! #     fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+//! #         assert_eq!(words.len(), 555);
+//! #         Ok(())
+//! #     }
+//! #     fn transfer(&mut self, _: &mut [u8], _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
+//! #     fn transfer_in_place(&mut self, _: &mut [u8]) -> Result<(), Self::Error> { Ok(()) }
+//! #     fn flush(&mut self) -> Result<(), Self::Error> { Ok(()) }
+//! # }
+//! # let spi_peripheral = MockSpi;
 //! use led_strip::{LedStrip, SpiCodec, SpiBackend, SpiEncodingPlan, Rgb, RgbOrder, Ws2812B};
 //!
 //! let codec = SpiCodec::<Rgb, Ws2812B>::for_protocol(
 //!     SpiEncodingPlan::ws2812_3bit(), false
-//! )?;
+//! ).unwrap();
 //! let backend = SpiBackend::new(spi_peripheral);
-//! let mut strip: LedStrip<Rgb, Ws2812B, _, _, 256> =
+//! // 60 pixels need 60 × 9 payload bytes + 15 reset bytes = 555 bytes.
+//! let mut strip: LedStrip<Rgb, Ws2812B, _, _, 1024> =
 //!     LedStrip::new(RgbOrder::Grb, codec, backend);
 //!
 //! let pixels = [Rgb::new(255, 0, 0); 60];
-//! strip.write(&pixels)?;
+//! strip.write(&pixels).unwrap();
+//! # }
 //! ```
 
 #![cfg_attr(not(test), no_std)]

@@ -6,17 +6,17 @@ English | [简体中文](README.zh-CN.md)
 [![codecov](https://codecov.io/gh/vhexl/led-strip/branch/main/graph/badge.svg)](https://codecov.io/gh/vhexl/led-strip)
 
 A `no_std` driver for single-wire addressable LED strips
-(WS2812B, SK6812, WS2811, WS2816) with compile-time buffer sizing
+(WS2812B, SK6812, WS2811, WS2816) with statically sized buffers
 and zero heap allocations.
 
 ## Features
 
 - **SPI backend** via `embedded-hal` — the only fully implemented backend today
-- **RMT & PIO backends** — compile-time skeletons; full transmit/encode paths pending
+- `WireCodec` / `TransportBackend` extension traits for custom backends; RMT and PIO implementations remain future work
 - Typed pixel formats: `Rgb` (8-bit), `Rgbw` (8-bit + white), `Rgb16` (16-bit)
-- Typed protocol presets: `Ws2812`, `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
-- Compile-time capacity checks in `LedStrip::write`; encode + transmit in one call
-- SPI encoding plan validation at construction time (bit-by-bit symbol simulation + timing tolerance vs protocol spec)
+- Typed protocol presets: `Ws2812B`, `Ws2811`, `Sk6812`, `Ws2816`
+- Runtime capacity checks on each `LedStrip::write` against the statically sized buffer; encode + transmit in one call
+- SPI encoding plan validation at construction time (symbol shape, distinct 0/1 symbols, exact timing bounds and minimum bit period)
 - Explicit `SpiEncodeError::InternalConsistency` for impossible post-check encode overflows
 - `invert_output` support for boards with external inverter circuits
 - Destructure with `into_parts()` to reuse backends across multiple strips
@@ -37,6 +37,14 @@ let mut strip = MyStrip::new(RgbOrder::Grb, codec, backend);
 let pixels = [Rgb::new(255, 0, 0); 60];
 strip.write(&pixels).unwrap();
 ```
+
+For WS2816B/C strips using 48-bit GRB data, use `Rgb16`, `Rgb16Order::Grb`,
+and `SpiEncodingPlan::ws2816_5bit()` with SPI configured to 4 MHz. This plan
+uses `10000`/`11100` symbols and needs `30 * pixel_count + 150` transmit bytes.
+The `Ws2816` marker validates each phase against the
+[WS2816B/C datasheet ranges](https://www.tme.eu/Document/2bd0f26702fa63d599bec05f7e359338/WS2816B-2121.pdf)
+and requires a bit period of at least 1250 ns. Use the actual peripheral clock
+when constructing a custom plan. WS2816A gain-control frames are not implemented.
 
 ## Releasing
 

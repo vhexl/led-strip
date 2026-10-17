@@ -14,7 +14,8 @@ use crate::{
 /// For example, WS2812B uses 3-bit symbols: `0b100` for logical 0, `0b110` for logical 1.
 ///
 /// Use the predefined constructors ([`ws2812_3bit`](Self::ws2812_3bit),
-/// [`sk6812_4bit`](Self::sk6812_4bit), [`ws2811_8bit`](Self::ws2811_8bit)) or build a custom plan with
+/// [`sk6812_4bit`](Self::sk6812_4bit), [`ws2811_8bit`](Self::ws2811_8bit),
+/// [`ws2816_5bit`](Self::ws2816_5bit)) or build a custom plan with
 /// [`new`](Self::new).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpiEncodingPlan {
@@ -48,11 +49,11 @@ impl SpiEncodingPlan {
 
     /// 3-bit SPI plan at 2.4 MHz for WS2812 / WS2812B.
     ///
-    /// Derived timing (spi_bit ~ 416 ns, tolerance +/-150 ns per WS2812B datasheet V1):
-    /// - T0H ~ 416 ns (expected 400 ns, delta = 16 ns OK)
-    /// - T0L ~ 833 ns (expected 850 ns, delta = 17 ns OK)
-    /// - T1H ~ 833 ns (expected 800 ns, delta = 33 ns OK)
-    /// - T1L ~ 416 ns (expected 450 ns, delta = 34 ns OK)
+    /// Derived timing (spi_bit ~ 416.667 ns, tolerance +/-150 ns per WS2812B datasheet V1):
+    /// - T0H ~ 416.667 ns (expected 400 ns, delta ~ 16.667 ns OK)
+    /// - T0L ~ 833.333 ns (expected 850 ns, delta ~ 16.667 ns OK)
+    /// - T1H ~ 833.333 ns (expected 800 ns, delta ~ 33.333 ns OK)
+    /// - T1L ~ 416.667 ns (expected 450 ns, delta ~ 33.333 ns OK)
     ///
     /// TX bytes per pixel: 3 ch × 8 bits × 3 SPI bits / 8 = 9 bytes.
     #[must_use]
@@ -62,9 +63,9 @@ impl SpiEncodingPlan {
 
     /// 4-bit SPI plan at 3.2 MHz for SK6812.
     ///
-    /// Derived timing (spi_bit ~ 312 ns, tolerance +/-150 ns per SK6812 datasheet):
-    /// - T0H ~ 312 ns (expected 300 ns, delta = 12 ns OK)
-    /// - T0L ~ 937 ns (expected 900 ns, delta = 37 ns OK)
+    /// Derived timing (spi_bit = 312.5 ns, tolerance +/-150 ns per SK6812 datasheet):
+    /// - T0H = 312.5 ns (expected 300 ns, delta = 12.5 ns OK)
+    /// - T0L = 937.5 ns (expected 900 ns, delta = 37.5 ns OK)
     /// - T1H ~ 625 ns (expected 600 ns, delta = 25 ns OK)
     /// - T1L ~ 625 ns (expected 600 ns, delta = 25 ns OK)
     ///
@@ -77,16 +78,26 @@ impl SpiEncodingPlan {
 
     /// 8-bit SPI plan at 3.2 MHz for WS2811 (400 kbps slow mode).
     ///
-    /// Derived timing (spi_bit ~ 312 ns, tolerance +/-150 ns):
-    /// - T0H ~ 624 ns (expected 500 ns, delta = 124 ns OK)
-    /// - T0L ~ 1872 ns (expected 2000 ns, delta = 128 ns OK)
-    /// - T1H ~ 1248 ns (expected 1200 ns, delta = 48 ns OK)
-    /// - T1L ~ 1248 ns (expected 1300 ns, delta = 52 ns OK)
+    /// Derived timing (spi_bit = 312.5 ns, tolerance +/-150 ns):
+    /// - T0H = 625 ns (expected 500 ns, delta = 125 ns OK)
+    /// - T0L = 1875 ns (expected 2000 ns, delta = 125 ns OK)
+    /// - T1H = 1250 ns (expected 1200 ns, delta = 50 ns OK)
+    /// - T1L = 1250 ns (expected 1300 ns, delta = 50 ns OK)
     ///
     /// TX bytes per pixel: 3 ch × 8 bits × 8 SPI bits / 8 = 24 bytes.
     #[must_use]
     pub const fn ws2811_8bit() -> Self {
         Self::new(3_200_000, 0b1100_0000, 0b1111_0000, 8)
+    }
+
+    /// 5-bit SPI plan at 4 MHz for the 48-bit WS2816B/WS2816C variants.
+    ///
+    /// T0H/T0L are 250/1000 ns and T1H/T1L are 750/500 ns. Each bit lasts
+    /// 1250 ns, satisfying both the per-phase limits and the minimum bit period.
+    /// TX bytes per pixel: 6 wire bytes × 5 = 30 bytes, plus reset.
+    #[must_use]
+    pub const fn ws2816_5bit() -> Self {
+        Self::new(4_000_000, 0b10000, 0b11100, 5)
     }
 
     /// Appends extra reset time for external signal conditioning.
@@ -125,8 +136,7 @@ impl SpiEncodingPlan {
 /// Identifies one of the four timing edges in a single-wire protocol bit:
 /// T0H (zero high), T0L (zero low), T1H (one high), T1L (one low).
 ///
-/// Used by [`SpiCodecPlanError::TimingOutOfTolerance`] to report which
-/// edge failed validation.
+/// Used by [`SpiCodecPlanError`] to report which edge failed validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TimingEdge {
@@ -153,7 +163,7 @@ impl core::fmt::Display for TimingEdge {
 }
 
 /// Errors returned when constructing a [`SpiCodec`] or validating an
-/// [`SpiEncodingPlan`] against a protocol's timing tolerances and
+/// [`SpiEncodingPlan`] against a protocol's timing limits and
 /// reset-duration arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -171,11 +181,30 @@ pub enum SpiCodecPlanError {
         pattern: u8,
         bits_per_symbol: u8,
     },
+    /// Logical 0 and 1 must produce different wire symbols.
+    IdenticalSymbolPatterns {
+        pattern: u8,
+    },
     TimingOutOfTolerance {
         edge: TimingEdge,
+        /// Rounded duration for diagnostics, saturated at `u32::MAX`.
         actual_ns: u32,
         expected_ns: u32,
         tolerance_ns: u32,
+    },
+    /// A phase violates explicit protocol timing limits.
+    TimingOutOfRange {
+        edge: TimingEdge,
+        /// Rounded duration for diagnostics, saturated at `u32::MAX`.
+        actual_ns: u32,
+        minimum_ns: u32,
+        maximum_ns: u32,
+    },
+    /// The complete high-plus-low symbol is shorter than the protocol permits.
+    BitPeriodTooShort {
+        /// Rounded duration for diagnostics, saturated at `u32::MAX`.
+        actual_ns: u32,
+        minimum_ns: u32,
     },
     /// Reset duration × SPI clock exceeds the `u64` fixed-point range used
     /// to compute reset byte counts.
@@ -213,6 +242,10 @@ impl core::fmt::Display for SpiCodecPlanError {
                 f,
                 "invalid SPI plan: pattern=0x{pattern:02X} must be contiguous high then contiguous low within bits_per_symbol={bits_per_symbol}"
             ),
+            Self::IdenticalSymbolPatterns { pattern } => write!(
+                f,
+                "invalid SPI plan: logical 0 and 1 use the same pattern=0x{pattern:02X}"
+            ),
             Self::TimingOutOfTolerance {
                 edge,
                 actual_ns,
@@ -221,6 +254,22 @@ impl core::fmt::Display for SpiCodecPlanError {
             } => write!(
                 f,
                 "timing out of tolerance: edge={edge} actual={actual_ns}ns expected={expected_ns}ns tolerance=\u{00B1}{tolerance_ns}ns"
+            ),
+            Self::TimingOutOfRange {
+                edge,
+                actual_ns,
+                minimum_ns,
+                maximum_ns,
+            } => write!(
+                f,
+                "timing out of range: edge={edge} actual={actual_ns}ns permitted={minimum_ns}..={maximum_ns}ns"
+            ),
+            Self::BitPeriodTooShort {
+                actual_ns,
+                minimum_ns,
+            } => write!(
+                f,
+                "bit period too short: actual={actual_ns}ns minimum={minimum_ns}ns"
             ),
             Self::ResetDurationOverflow {
                 total_reset_ns,
@@ -306,6 +355,7 @@ where
     /// durations whose fixed-point arithmetic would overflow, but does
     /// **not** check protocol timing. Use [`for_protocol`](Self::for_protocol)
     /// if timing validation is desired.
+    /// Each symbol must be a distinct, contiguous high-then-low waveform.
     #[must_use = "SPI codec construction validates the plan; ignoring the result would silently drop errors"]
     pub fn new(plan: SpiEncodingPlan, invert_output: bool) -> Result<Self, SpiCodecPlanError> {
         validate_plan(plan)?;
@@ -313,12 +363,13 @@ where
         Ok(Self::from_plan(plan, invert_output))
     }
 
-    /// Constructs a codec with structural, protocol timing tolerance, and
+    /// Constructs a codec with structural, protocol timing limits, and
     /// reset-duration overflow validation.
     ///
     /// Preferred over [`Self::new`] when the target protocol is known at construction time.
-    /// Returns [`SpiCodecPlanError::TimingOutOfTolerance`] if any of the four timing edges
-    /// (T0H, T0L, T1H, T1L) exceeds `Proto::TIMING_TOLERANCE_NS`.
+    /// Checks all four phases against `Proto::ZERO_MIN`/`ZERO_MAX` and
+    /// `Proto::ONE_MIN`/`ONE_MAX`, plus `Proto::MIN_BIT_PERIOD_NS`, without
+    /// rounding the durations. Error durations are rounded only for diagnostics.
     #[must_use = "returns Err on timing violations; use new() to skip timing validation"]
     pub fn for_protocol(
         plan: SpiEncodingPlan,
@@ -571,6 +622,12 @@ fn validate_plan(plan: SpiEncodingPlan) -> Result<(), SpiCodecPlanError> {
     simulate_symbol_phases(plan.zero_pattern, plan.bits_per_symbol)?;
     simulate_symbol_phases(plan.one_pattern, plan.bits_per_symbol)?;
 
+    if plan.zero_pattern == plan.one_pattern {
+        return Err(SpiCodecPlanError::IdenticalSymbolPatterns {
+            pattern: plan.zero_pattern,
+        });
+    }
+
     Ok(())
 }
 
@@ -698,72 +755,111 @@ fn simulate_symbol_phases(pattern: u8, bits_per_symbol: u8) -> Result<(u8, u8), 
     Ok((high_bits, low_bits))
 }
 
-/// Derives actual `T0H/T0L/T1H/T1L` from `plan` and compares against
-/// `Proto::ZERO/ONE` using the symmetric `TIMING_TOLERANCE_NS` band.
-/// Each edge must satisfy `|actual —expected| —tolerance`.
-///
-/// Timing derivation:
-///   `spi_bit_ns = 10^9 / spi_hz`
-///   `T0H = simulated_high_bits(zero_pattern) × spi_bit_ns`
-///   `T0L = simulated_low_bits(zero_pattern) × spi_bit_ns`
-///   —same for T1H/T1L.
+/// Checks exact phase durations against inclusive protocol bounds.
+/// Cross multiplication avoids rounding an SPI cycle before scaling a phase.
 fn validate_timing<P, Proto>(plan: &SpiEncodingPlan) -> Result<(), SpiCodecPlanError>
 where
     P: LedPixel,
     Proto: SingleWireProtocol<P>,
 {
-    // Integer division is safe: validate_plan already ensures spi_hz != 0.
-    // Round to nearest rather than truncating so that timing values that are
-    // slightly below the next integer are correctly represented (max error < 0.5 ns).
-    let spi_bit_ns = (1_000_000_000_u32 + plan.spi_hz / 2) / plan.spi_hz;
     let tolerance = Proto::TIMING_TOLERANCE_NS;
 
     let (zero_high, zero_low) = simulate_symbol_phases(plan.zero_pattern, plan.bits_per_symbol)?;
     let (one_high, one_low) = simulate_symbol_phases(plan.one_pattern, plan.bits_per_symbol)?;
 
     check_timing(
-        u32::from(zero_high) * spi_bit_ns,
+        zero_high,
+        plan.spi_hz,
         Proto::ZERO.high_ns,
+        Proto::ZERO_MIN.high_ns,
+        Proto::ZERO_MAX.high_ns,
         tolerance,
         TimingEdge::ZeroHigh,
     )?;
     check_timing(
-        u32::from(zero_low) * spi_bit_ns,
+        zero_low,
+        plan.spi_hz,
         Proto::ZERO.low_ns,
+        Proto::ZERO_MIN.low_ns,
+        Proto::ZERO_MAX.low_ns,
         tolerance,
         TimingEdge::ZeroLow,
     )?;
     check_timing(
-        u32::from(one_high) * spi_bit_ns,
+        one_high,
+        plan.spi_hz,
         Proto::ONE.high_ns,
+        Proto::ONE_MIN.high_ns,
+        Proto::ONE_MAX.high_ns,
         tolerance,
         TimingEdge::OneHigh,
     )?;
     check_timing(
-        u32::from(one_low) * spi_bit_ns,
+        one_low,
+        plan.spi_hz,
         Proto::ONE.low_ns,
+        Proto::ONE_MIN.low_ns,
+        Proto::ONE_MAX.low_ns,
         tolerance,
         TimingEdge::OneLow,
     )?;
+
+    // Both symbols have the same width, so their total bit periods are equal.
+    if u64::from(plan.bits_per_symbol) * 1_000_000_000
+        < u64::from(Proto::MIN_BIT_PERIOD_NS) * u64::from(plan.spi_hz)
+    {
+        return Err(SpiCodecPlanError::BitPeriodTooShort {
+            actual_ns: rounded_duration_ns(plan.bits_per_symbol, plan.spi_hz),
+            minimum_ns: Proto::MIN_BIT_PERIOD_NS,
+        });
+    }
 
     Ok(())
 }
 
 fn check_timing(
-    actual_ns: u32,
+    phase_bits: u8,
+    spi_hz: u32,
     expected_ns: u32,
+    minimum_ns: u32,
+    maximum_ns: u32,
     tolerance_ns: u32,
     edge: TimingEdge,
 ) -> Result<(), SpiCodecPlanError> {
-    if actual_ns.abs_diff(expected_ns) > tolerance_ns {
-        return Err(SpiCodecPlanError::TimingOutOfTolerance {
+    // A u32 nanosecond bound multiplied by a u32 frequency always fits u64.
+    // Validated phase widths are at most 7 bits, even for a 1 Hz SPI clock.
+    let scaled_duration = u64::from(phase_bits) * 1_000_000_000;
+    if scaled_duration < u64::from(minimum_ns) * u64::from(spi_hz)
+        || scaled_duration > u64::from(maximum_ns) * u64::from(spi_hz)
+    {
+        let actual_ns = rounded_duration_ns(phase_bits, spi_hz);
+        // Keep the existing error variant for protocols using the legacy
+        // symmetric tolerance, while reporting explicit limits accurately.
+        if minimum_ns == expected_ns.saturating_sub(tolerance_ns)
+            && maximum_ns == expected_ns.saturating_add(tolerance_ns)
+        {
+            return Err(SpiCodecPlanError::TimingOutOfTolerance {
+                edge,
+                actual_ns,
+                expected_ns,
+                tolerance_ns,
+            });
+        }
+        return Err(SpiCodecPlanError::TimingOutOfRange {
             edge,
             actual_ns,
-            expected_ns,
-            tolerance_ns,
+            minimum_ns,
+            maximum_ns,
         });
     }
     Ok(())
+}
+
+/// Rounds the whole phase for diagnostics only. Validation uses exact ratios.
+fn rounded_duration_ns(bits: u8, spi_hz: u32) -> u32 {
+    let scaled_duration = u64::from(bits) * 1_000_000_000;
+    let actual_ns = (scaled_duration + u64::from(spi_hz) / 2) / u64::from(spi_hz);
+    u32::try_from(actual_ns).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -1073,10 +1169,9 @@ mod tests {
 
     #[test]
     fn timing_exactly_at_tolerance_boundary_passes() {
-        // 2.5 MHz 3-bit: spi_bit=400 ns
-        // T0H=400 ns (Δ=0 —150 —, T0L=800 ns (Δ=50 —150 —
-        // T1H=800 ns (Δ=0 —150 —, T1L=400 ns (Δ=50 —150 —
-        let plan = SpiEncodingPlan::new(2_500_000, 0b100, 0b110, 3);
+        // T0H=400, T0L=1000, T1H=800, T1L=600 ns.
+        // Both low phases are exactly at their +150 ns tolerance boundary.
+        let plan = SpiEncodingPlan::new(5_000_000, 0b1100000, 0b1111000, 7);
         SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap();
     }
 
@@ -1213,14 +1308,188 @@ mod tests {
 
     #[test]
     fn encode_ws2816_produces_correct_length() {
-        // 4 MHz, 4-bit: spi_bit=250, all edges within +/-150 ns of WS2816 spec.
-        let plan = SpiEncodingPlan::new(4_000_000, 0b1000, 0b1100, 4);
-        let codec = SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap();
+        let codec =
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(SpiEncodingPlan::ws2816_5bit(), false).unwrap();
         let pixel_count = 1;
         let pixels = [Rgb16::new(0, 0, 0)];
         let mut out: HVec<u8, 256> = HVec::new();
         codec.encode(Rgb16Order::Grb, &pixels, &mut out).unwrap();
         assert_eq!(out.len(), codec.encoded_len(pixel_count));
+        // 48 bits × 5 SPI bits = 30 payload bytes, plus 300 us at 4 MHz = 150 bytes.
+        assert_eq!(out.len(), 180);
+    }
+
+    #[test]
+    fn ws2816_black_and_white_have_different_payloads() {
+        let codec =
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(SpiEncodingPlan::ws2816_5bit(), false).unwrap();
+        let mut black: HVec<u8, 180> = HVec::new();
+        let mut white: HVec<u8, 180> = HVec::new();
+        codec
+            .encode(Rgb16Order::Grb, &[Rgb16::BLACK], &mut black)
+            .unwrap();
+        codec
+            .encode(Rgb16Order::Grb, &[Rgb16::WHITE], &mut white)
+            .unwrap();
+        assert_ne!(&black[..30], &white[..30]);
+        assert_eq!(&black[30..], &[0; 150]);
+        assert_eq!(&white[30..], &[0; 150]);
+    }
+
+    #[test]
+    fn ws2816_rejects_the_previous_four_bit_plan() {
+        let plan = SpiEncodingPlan::new(4_000_000, 0b1000, 0b1100, 4);
+        assert_eq!(
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap_err(),
+            SpiCodecPlanError::TimingOutOfRange {
+                edge: TimingEdge::ZeroLow,
+                actual_ns: 750,
+                minimum_ns: 800,
+                maximum_ns: 1_200,
+            }
+        );
+    }
+
+    #[test]
+    fn ws2816_checks_the_bit_period_independently_of_phase_limits() {
+        // All four phases (200/1000/600/600 ns) satisfy their individual bounds.
+        let plan = SpiEncodingPlan::new(5_000_000, 0b100000, 0b111000, 6);
+        assert_eq!(
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap_err(),
+            SpiCodecPlanError::BitPeriodTooShort {
+                actual_ns: 1_200,
+                minimum_ns: 1_250,
+            }
+        );
+    }
+
+    #[test]
+    fn ws2816_does_not_round_a_short_bit_period_up_to_the_limit() {
+        SpiCodec::<Rgb16, Ws2816>::for_protocol(SpiEncodingPlan::ws2816_5bit(), false).unwrap();
+        // Its phases remain valid, but the 1249.9996875 ns period is too short.
+        let plan = SpiEncodingPlan::new(4_000_001, 0b10000, 0b11100, 5);
+        assert_eq!(
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap_err(),
+            SpiCodecPlanError::BitPeriodTooShort {
+                actual_ns: 1_250,
+                minimum_ns: 1_250,
+            }
+        );
+    }
+
+    #[test]
+    fn ws2816_accepts_inclusive_phase_boundaries() {
+        let plans = [
+            // T0H=200 min, T0L=1200 max, T1H=800 max, T1L=600 ns.
+            SpiEncodingPlan::new(5_000_000, 0b1000000, 0b1111000, 7),
+            // T0H=320 max, T0L=960, T1H=800 max, T1L=480 min ns.
+            SpiEncodingPlan::new(6_250_000, 0b11000000, 0b11111000, 8),
+        ];
+        for plan in plans {
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn ws2816_rejects_fractional_phase_boundary_violations() {
+        let cases = [
+            // T0H is slightly below 200 ns.
+            (
+                SpiEncodingPlan::new(5_000_001, 0b1000000, 0b1111000, 7),
+                TimingEdge::ZeroHigh,
+            ),
+            // T0L is slightly above 1200 ns.
+            (
+                SpiEncodingPlan::new(4_999_999, 0b1000000, 0b1111000, 7),
+                TimingEdge::ZeroLow,
+            ),
+            // T0H is slightly above 320 ns.
+            (
+                SpiEncodingPlan::new(6_249_999, 0b11000000, 0b11111000, 8),
+                TimingEdge::ZeroHigh,
+            ),
+            // T1L is slightly below 480 ns.
+            (
+                SpiEncodingPlan::new(6_250_001, 0b11000000, 0b11111000, 8),
+                TimingEdge::OneLow,
+            ),
+        ];
+        for (plan, expected_edge) in cases {
+            assert!(matches!(
+                SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false),
+                Err(SpiCodecPlanError::TimingOutOfRange { edge, .. }) if edge == expected_edge
+            ));
+        }
+    }
+
+    #[test]
+    fn ws2816_checks_the_fractional_one_high_lower_boundary() {
+        // A 520 ns phase cannot be represented exactly with these SPI frequencies.
+        // Two cycles fall just above the limit at 3_846_153 Hz and below it at
+        // 3_846_154 Hz, although both diagnostic durations round to 520 ns.
+        let inside = SpiEncodingPlan::new(3_846_153, 0b10000, 0b11000, 5);
+        SpiCodec::<Rgb16, Ws2816>::for_protocol(inside, false).unwrap();
+        let outside = SpiEncodingPlan::new(3_846_154, 0b10000, 0b11000, 5);
+        assert_eq!(
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(outside, false).unwrap_err(),
+            SpiCodecPlanError::TimingOutOfRange {
+                edge: TimingEdge::OneHigh,
+                actual_ns: 520,
+                minimum_ns: 520,
+                maximum_ns: 800,
+            }
+        );
+    }
+
+    #[test]
+    fn timing_accepts_valid_fractional_phases_without_rounding_each_spi_cycle() {
+        // WS2812B phases: 466.853/700.280/700.280/466.853 ns, all within limits.
+        let plan = SpiEncodingPlan::new(4_284_000, 0b11000, 0b11100, 5);
+        SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap();
+        // WS2811 phases: 616.998/1850.995/1233.997/1233.997 ns, all within limits.
+        let plan = SpiEncodingPlan::new(3_241_500, 0b11000000, 0b11110000, 8);
+        SpiCodec::<Rgb, Ws2811>::for_protocol(plan, false).unwrap();
+    }
+
+    #[test]
+    fn timing_rejects_fractional_phases_outside_the_legacy_tolerance() {
+        // T0L is 699.301 ns, below the 700 ns minimum.
+        let plan = SpiEncodingPlan::new(2_860_000, 0b100, 0b110, 3);
+        assert!(matches!(
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false),
+            Err(SpiCodecPlanError::TimingOutOfTolerance {
+                edge: TimingEdge::ZeroLow,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn timing_returns_an_error_for_one_hz_without_overflowing() {
+        let plan = SpiEncodingPlan::new(1, 0b111110, 0b100000, 6);
+        assert_eq!(
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(plan, false).unwrap_err(),
+            SpiCodecPlanError::TimingOutOfTolerance {
+                edge: TimingEdge::ZeroHigh,
+                actual_ns: u32::MAX,
+                expected_ns: 400,
+                tolerance_ns: 150,
+            }
+        );
+    }
+
+    #[test]
+    fn constructors_reject_identical_symbols() {
+        let plan = SpiEncodingPlan::new(4_000_000, 0b100, 0b100, 3);
+        let expected = SpiCodecPlanError::IdenticalSymbolPatterns { pattern: 0b100 };
+        assert_eq!(
+            SpiCodec::<Rgb, Ws2812B>::new(plan, false).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            SpiCodec::<Rgb16, Ws2816>::for_protocol(plan, false).unwrap_err(),
+            expected
+        );
     }
 
     // ── Extra reset_ns ───────────────────────────────────────────────

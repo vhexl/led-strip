@@ -90,7 +90,7 @@ where
 {
     /// Error type produced by [`encode`](Self::encode).
     ///
-    /// For [`SpiCodec`](crate::SpiCodec) this is [`SpiEncodeError`](crate::SpiEncodeError),
+    /// For `SpiCodec` this is `SpiEncodeError`,
     /// which reports only internal-consistency failures (a codec logic bug)
     /// rather than user-input errors such as buffer overflows.
     type EncodeError;
@@ -123,8 +123,8 @@ where
 /// |-----------|------|
 /// | `P` | Pixel type ([`crate::Rgb`], [`crate::Rgbw`], [`crate::Rgb16`]) |
 /// | `Proto` | Protocol marker ([`crate::Ws2812B`], [`crate::Sk6812`], [`crate::Ws2811`], [`crate::Ws2816`]) |
-/// | `Codec` | Encoding scheme (currently [`crate::SpiCodec`]; future backends may provide their own) |
-/// | `Backend` | Transport layer (currently [`crate::SpiBackend`]; future backends may provide their own) |
+/// | `Codec` | Encoding scheme (currently `SpiCodec`; future backends may provide their own) |
+/// | `Backend` | Transport layer (currently `SpiBackend`; future backends may provide their own) |
 /// | `TX_CAPACITY` | Compile-time upper bound on transport buffer size (in `Word`s) |
 pub struct LedStrip<P, Proto, Codec, Backend, const TX_CAPACITY: usize>
 where
@@ -274,100 +274,104 @@ mod tests {
 
     // ── LedStrip integration tests ──────────────────────────────────
 
-    use crate::{Rgb, RgbOrder, SpiCodec, SpiEncodingPlan, Ws2812B};
-    use core::cell::Cell;
+    #[cfg(feature = "spi")]
+    mod spi_tests {
+        use super::*;
+        use crate::{Rgb, RgbOrder, SpiCodec, SpiEncodingPlan, Ws2812B};
+        use core::cell::Cell;
 
-    /// Mock backend that records the byte count of the last transmit call.
-    #[derive(Debug)]
-    struct MockBackend(Cell<usize>);
+        /// Mock backend that records the byte count of the last transmit call.
+        #[derive(Debug)]
+        struct MockBackend(Cell<usize>);
 
-    impl MockBackend {
-        fn new() -> Self {
-            Self(Cell::new(0))
+        impl MockBackend {
+            fn new() -> Self {
+                Self(Cell::new(0))
+            }
+            fn last_tx_len(&self) -> usize {
+                self.0.get()
+            }
         }
-        fn last_tx_len(&self) -> usize {
-            self.0.get()
+
+        impl TransportBackend for MockBackend {
+            type Word = u8;
+            type Error = core::convert::Infallible;
+
+            fn transmit(&mut self, words: &[Self::Word]) -> Result<(), Self::Error> {
+                self.0.set(words.len());
+                Ok(())
+            }
         }
-    }
 
-    impl TransportBackend for MockBackend {
-        type Word = u8;
-        type Error = core::convert::Infallible;
+        type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 256>;
 
-        fn transmit(&mut self, words: &[Self::Word]) -> Result<(), Self::Error> {
-            self.0.set(words.len());
-            Ok(())
+        fn make_codec() -> SpiCodec<Rgb, Ws2812B> {
+            SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap()
         }
-    }
 
-    type TestStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 256>;
+        fn make_strip() -> TestStrip {
+            TestStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new())
+        }
 
-    fn make_codec() -> SpiCodec<Rgb, Ws2812B> {
-        SpiCodec::<Rgb, Ws2812B>::for_protocol(SpiEncodingPlan::ws2812_3bit(), false).unwrap()
-    }
+        #[test]
+        fn new_constructs_without_error() {
+            let strip = make_strip();
+            // Verify default state
+            let _ = format!("{strip:?}");
+        }
 
-    fn make_strip() -> TestStrip {
-        TestStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new())
-    }
+        #[test]
+        fn write_transmits_encoded_data() {
+            let mut strip = make_strip();
+            strip
+                .write(&[
+                    Rgb::new(255, 0, 0),
+                    Rgb::new(0, 255, 0),
+                    Rgb::new(0, 0, 255),
+                ])
+                .unwrap();
+            assert!(
+                strip.backend.last_tx_len() > 0,
+                "expected non-zero transmit length"
+            );
+        }
 
-    #[test]
-    fn new_constructs_without_error() {
-        let strip = make_strip();
-        // Verify default state
-        let _ = format!("{strip:?}");
-    }
+        #[test]
+        fn write_with_zero_pixels_sends_reset_only() {
+            let mut strip = make_strip();
+            strip.write(&[]).unwrap();
+            // Zero pixels still produce reset/latch bytes
+            assert!(strip.backend.last_tx_len() > 0);
+        }
 
-    #[test]
-    fn write_transmits_encoded_data() {
-        let mut strip = make_strip();
-        strip
-            .write(&[
-                Rgb::new(255, 0, 0),
-                Rgb::new(0, 255, 0),
-                Rgb::new(0, 0, 255),
-            ])
-            .unwrap();
-        assert!(
-            strip.backend.last_tx_len() > 0,
-            "expected non-zero transmit length"
-        );
-    }
+        #[test]
+        fn write_rejects_buffer_too_small() {
+            type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 5>;
+            let mut strip = TinyStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new());
+            // 2 pixels × 9 payload bytes + reset ≫ 5
+            let err = strip
+                .write(&[Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)])
+                .unwrap_err();
+            assert!(matches!(err, LedStripError::BufferTooSmall { .. }));
+        }
 
-    #[test]
-    fn write_with_zero_pixels_sends_reset_only() {
-        let mut strip = make_strip();
-        strip.write(&[]).unwrap();
-        // Zero pixels still produce reset/latch bytes
-        assert!(strip.backend.last_tx_len() > 0);
-    }
+        #[test]
+        fn into_parts_returns_owned_codec_and_backend() {
+            let strip = make_strip();
+            let (codec, _backend) = strip.into_parts();
+            // Verify the codec still works
+            assert_eq!(codec.plan().spi_hz(), 2_400_000);
+        }
 
-    #[test]
-    fn write_rejects_buffer_too_small() {
-        type TinyStrip = LedStrip<Rgb, Ws2812B, SpiCodec<Rgb, Ws2812B>, MockBackend, 5>;
-        let mut strip = TinyStrip::new(RgbOrder::Grb, make_codec(), MockBackend::new());
-        // 2 pixels × 9 payload bytes + reset ≫ 5
-        let err = strip
-            .write(&[Rgb::new(0, 0, 0), Rgb::new(0, 0, 0)])
-            .unwrap_err();
-        assert!(matches!(err, LedStripError::BufferTooSmall { .. }));
-    }
-
-    #[test]
-    fn into_parts_returns_owned_codec_and_backend() {
-        let strip = make_strip();
-        let (codec, _backend) = strip.into_parts();
-        // Verify the codec still works
-        assert_eq!(codec.plan().spi_hz(), 2_400_000);
-    }
-
-    #[test]
-    fn debug_output_contains_fields() {
-        let strip = make_strip();
-        let s = format!("{strip:?}");
-        assert!(s.contains("LedStrip"), "{s}");
-        assert!(s.contains("color_order"), "{s}");
-        assert!(s.contains("codec"), "{s}");
-        assert!(s.contains("backend"), "{s}");
-        assert!(s.contains("tx_buf"), "{s}");
+        #[test]
+        fn debug_output_contains_fields() {
+            let strip = make_strip();
+            let s = format!("{strip:?}");
+            assert!(s.contains("LedStrip"), "{s}");
+            assert!(s.contains("color_order"), "{s}");
+            assert!(s.contains("codec"), "{s}");
+            assert!(s.contains("backend"), "{s}");
+            assert!(s.contains("tx_buf"), "{s}");
+        }
     }
 }

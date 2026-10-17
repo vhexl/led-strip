@@ -25,17 +25,17 @@ pub struct PulseTiming {
 /// Describes the wire-level electrical characteristics of a single-wire LED
 /// protocol (pulse timings, reset duration).
 ///
-/// Each protocol is a zero-sized marker type (`Ws2812`, `Sk6812`, …) that
+/// Each protocol is a zero-sized marker type (`Ws2812B`, `Sk6812`, …) that
 /// implements this trait for the pixel formats it can drive. An incompatible
 /// `<pixel, protocol>` pair fails at compile time — no runtime check is needed.
 ///
 /// Constants:
 /// - `ZERO`/`ONE`: nominal `(high_ns, low_ns)` for a logical 0 and 1 bit.
 /// - `RESET_NS`: minimum low-level time to latch the frame.
-/// - `TIMING_TOLERANCE_NS`: symmetric tolerance for SPI encoding plan validation.
-///   Each edge must satisfy `|actual − expected| ≤ TIMING_TOLERANCE_NS`.
-///   Defaults to 150 ns (WS2812B-class datasheet typical). Override for stricter
-///   or looser protocols.
+/// - `ZERO_MIN`/`ZERO_MAX` and `ONE_MIN`/`ONE_MAX`: inclusive timing limits.
+///   By default these are derived from the nominal timings and
+///   `TIMING_TOLERANCE_NS`; protocols can override each limit independently.
+/// - `MIN_BIT_PERIOD_NS`: minimum high-plus-low duration for either bit value.
 pub trait SingleWireProtocol<P>: private::ProtocolSealed
 where
     P: LedPixel,
@@ -51,11 +51,34 @@ where
     /// Nominal pulse timing for a logical 1 bit.
     const ONE: PulseTiming;
 
-    /// Symmetric timing tolerance for SPI encoding plan validation.
-    /// Each edge must satisfy `|actual − expected| ≤ TIMING_TOLERANCE_NS`.
+    /// Symmetric tolerance used to derive the default timing limits.
     /// Defaults to 150 ns (common tolerance for WS2812B-class protocols).
-    /// Override in a specific impl for protocols with stricter or looser requirements.
+    /// Explicit `ZERO_MIN`/`ZERO_MAX` and `ONE_MIN`/`ONE_MAX` overrides take
+    /// precedence when a protocol has different limits for each phase.
     const TIMING_TOLERANCE_NS: u32 = 150;
+
+    /// Inclusive minimum high/low durations for a logical 0 bit.
+    const ZERO_MIN: PulseTiming = PulseTiming {
+        high_ns: Self::ZERO.high_ns.saturating_sub(Self::TIMING_TOLERANCE_NS),
+        low_ns: Self::ZERO.low_ns.saturating_sub(Self::TIMING_TOLERANCE_NS),
+    };
+    /// Inclusive maximum high/low durations for a logical 0 bit.
+    const ZERO_MAX: PulseTiming = PulseTiming {
+        high_ns: Self::ZERO.high_ns.saturating_add(Self::TIMING_TOLERANCE_NS),
+        low_ns: Self::ZERO.low_ns.saturating_add(Self::TIMING_TOLERANCE_NS),
+    };
+    /// Inclusive minimum high/low durations for a logical 1 bit.
+    const ONE_MIN: PulseTiming = PulseTiming {
+        high_ns: Self::ONE.high_ns.saturating_sub(Self::TIMING_TOLERANCE_NS),
+        low_ns: Self::ONE.low_ns.saturating_sub(Self::TIMING_TOLERANCE_NS),
+    };
+    /// Inclusive maximum high/low durations for a logical 1 bit.
+    const ONE_MAX: PulseTiming = PulseTiming {
+        high_ns: Self::ONE.high_ns.saturating_add(Self::TIMING_TOLERANCE_NS),
+        low_ns: Self::ONE.low_ns.saturating_add(Self::TIMING_TOLERANCE_NS),
+    };
+    /// Minimum high-plus-low duration for either bit value, or 0 if unrestricted.
+    const MIN_BIT_PERIOD_NS: u32 = 0;
 }
 
 /// Protocol marker for WS2812B (3-channel 8-bit RGB, GRB order, 800 kbps).
@@ -70,7 +93,11 @@ pub struct Ws2811;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sk6812;
 
-/// Protocol marker for WS2816 (3-channel 16-bit RGB, GRB order).
+/// Protocol marker for the 48-bit WS2816B/WS2816C variants
+/// (3-channel 16-bit RGB, GRB order).
+///
+/// Uses the manufacturer's per-phase limits and a minimum bit period of
+/// 1250 ns. Other WS2816 variants may use a different wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Ws2816;
 
@@ -121,14 +148,31 @@ impl SingleWireProtocol<Rgbw> for Sk6812 {
 impl SingleWireProtocol<Rgb16> for Ws2816 {
     const NAME: &'static str = "WS2816";
     const DEFAULT_COLOR_ORDER: Rgb16Order = Rgb16Order::Grb;
-    // 16-bit channels + color order shift → longer reset latch required.
     const RESET_NS: u32 = 300_000;
+    // Midpoints of the manufacturer's WS2816B/C 48-bit timing ranges.
     const ZERO: PulseTiming = PulseTiming {
-        high_ns: 200,
-        low_ns: 600,
+        high_ns: 260,
+        low_ns: 1_000,
     };
     const ONE: PulseTiming = PulseTiming {
-        high_ns: 400,
-        low_ns: 400,
+        high_ns: 660,
+        low_ns: 740,
     };
+    const ZERO_MIN: PulseTiming = PulseTiming {
+        high_ns: 200,
+        low_ns: 800,
+    };
+    const ZERO_MAX: PulseTiming = PulseTiming {
+        high_ns: 320,
+        low_ns: 1_200,
+    };
+    const ONE_MIN: PulseTiming = PulseTiming {
+        high_ns: 520,
+        low_ns: 480,
+    };
+    const ONE_MAX: PulseTiming = PulseTiming {
+        high_ns: 800,
+        low_ns: 1_000,
+    };
+    const MIN_BIT_PERIOD_NS: u32 = 1_250;
 }
