@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/vhexl/led-strip/compare/v0.3.0...v0.4.0) - 2026-10-17
+
+### Other
+
+- update CI and release workflows, add dependency audit configuration
+- Refactor SPI codec and protocol handling
+
 ## [0.3.0](https://github.com/vhexl/led-strip/compare/v0.2.0...v0.3.0) - 2026-08-13
 
 ### Other
