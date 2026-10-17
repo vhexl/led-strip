@@ -2,43 +2,50 @@ name: CI
 
 on:
   push:
-  pull_request:
     branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel runs on main so every merged commit keeps its result.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  # ── Build + Test + Coverage on stable ──────────────────────────────
+  # -- Build + Test + Coverage on stable ------------------------------
   test-coverage:
     name: Test + Coverage (stable)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
 
       - name: Run tests with coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
 
       - name: Verify lcov report
         run: |
@@ -57,8 +64,10 @@ jobs:
           echo "First SF entries after normalization:"
           grep '^SF:' lcov.info | head -n 10
 
+      # Secrets are unavailable to PRs from forks and to Dependabot runs.
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+        if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./lcov.info
           disable_search: true
@@ -66,58 +75,93 @@ jobs:
           fail_ci_if_error: true
           verbose: true
 
-  # ── MSRV build + test ─────────────────────────────────────────────
+  # -- MSRV build + test ---------------------------------------------
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust 1.88 (MSRV)
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.88"
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build & test on MSRV
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
       - name: Build & test without default features on MSRV
-        run: cargo test --no-default-features
+        run: cargo test --locked --no-default-features
 
-  # ── Clippy lint ───────────────────────────────────────────────────
+  # -- Bare-metal build (verifies no_std) ----------------------------
+  no-std:
+    name: no_std (riscv32imac-unknown-none-elf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build with all features
+        run: cargo build --locked --target riscv32imac-unknown-none-elf --all-features
+
+      - name: Build without default features
+        run: cargo build --locked --target riscv32imac-unknown-none-elf --no-default-features
+
+  # -- Clippy lint ---------------------------------------------------
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Run clippy
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings
 
-  # ── Rustfmt check ─────────────────────────────────────────────────
+  # -- Rustfmt check -------------------------------------------------
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: rustfmt
@@ -125,28 +169,60 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  # ── Docs build ────────────────────────────────────────────────────
+  # -- Docs build ----------------------------------------------------
   docs:
     name: Docs
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --locked --all-features --no-deps
 
       - name: Build docs without default features
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-default-features --no-deps
+        run: cargo doc --locked --no-default-features --no-deps
+
+  # -- Dependency audit (advisories, licenses, sources) --------------
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # -- Single required check for branch protection -------------------
+  ci-success:
+    name: CI success
+    if: ${{ always() }}
+    needs: [test-coverage, msrv, no-std, clippy, fmt, docs, deny]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "One or more required jobs did not succeed"
+            exit 1
+          fi

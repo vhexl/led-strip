@@ -1,9 +1,13 @@
 # led-strip
 
-English | [简体中文](README.zh-CN.md)
-
 [![CI](https://github.com/vhexl/led-strip/actions/workflows/ci.yml/badge.svg)](https://github.com/vhexl/led-strip/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/vhexl/led-strip/branch/main/graph/badge.svg)](https://codecov.io/gh/vhexl/led-strip)
+[![crates.io](https://img.shields.io/crates/v/led-strip.svg)](https://crates.io/crates/led-strip)
+[![docs.rs](https://img.shields.io/docsrs/led-strip)](https://docs.rs/led-strip)
+[![MSRV](https://img.shields.io/crates/msrv/led-strip)](https://github.com/vhexl/led-strip/blob/main/Cargo.toml)
+[![License](https://img.shields.io/crates/l/led-strip.svg)](#license)
+
+English | [简体中文](README.zh-CN.md)
 
 A `no_std` driver for single-wire addressable LED strips
 (WS2812B, SK6812, WS2811, WS2816) with statically sized buffers
@@ -54,7 +58,7 @@ This project uses [release-plz](https://release-plz.dev/) to automate releases:
    with the correct version bumps and a changelog derived from
    [Conventional Commits](https://www.conventionalcommits.org/).
 2. Merge the Release PR when ready — release-plz will then:
-   - Create the git tag (`led-strip-v<version>`)
+   - Create the git tag (`v<version>`)
    - Publish to [crates.io](https://crates.io/crates/led-strip)
    - Create a GitHub release with release notes
 

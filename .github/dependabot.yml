@@ -1,0 +1,17 @@
+version: 2
+
+updates:
+  # Keep the SHA-pinned actions current. The cooldown delays adopting a fresh
+  # release so a compromised tag has time to be noticed and pulled.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"

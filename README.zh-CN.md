@@ -1,9 +1,13 @@
 # led-strip
 
-[English](README.md) | 简体中文
-
 [![CI](https://github.com/vhexl/led-strip/actions/workflows/ci.yml/badge.svg)](https://github.com/vhexl/led-strip/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/vhexl/led-strip/branch/main/graph/badge.svg)](https://codecov.io/gh/vhexl/led-strip)
+[![crates.io](https://img.shields.io/crates/v/led-strip.svg)](https://crates.io/crates/led-strip)
+[![docs.rs](https://img.shields.io/docsrs/led-strip)](https://docs.rs/led-strip)
+[![MSRV](https://img.shields.io/crates/msrv/led-strip)](https://github.com/vhexl/led-strip/blob/main/Cargo.toml)
+[![License](https://img.shields.io/crates/l/led-strip.svg)](#许可证)
+
+[English](README.md) | 简体中文
 
 一个 `no_std` 的单线可寻址 LED 灯带驱动，支持
 WS2812B、SK6812、WS2811、WS2816。缓冲区容量在编译期确定，
@@ -53,7 +57,7 @@ strip.write(&pixels).unwrap();
 1. 每次推送到 `main` 分支，release-plz 会自动创建/更新一个 **Release PR**，
    包含版本号与基于 [约定式提交](https://www.conventionalcommits.org/) 生成的更新日志。
 2. 合并 Release PR 后，release-plz 将自动：
-   - 创建 git 标签（`led-strip-v<version>`）
+   - 创建 git 标签（`v<version>`）
    - 发布到 [crates.io](https://crates.io/crates/led-strip)
    - 创建 GitHub Release 及发布说明
 

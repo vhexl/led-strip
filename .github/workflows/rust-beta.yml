@@ -1,0 +1,56 @@
+name: Rust beta
+
+# Early warning for the next stable Rust release. A red run is a signal to
+# investigate, not a merge blocker: this workflow is not part of the required
+# CI checks.
+# Clippy is deliberately not run here: new beta lints report style, not
+# compatibility, and denying warnings would turn them into failures.
+
+on:
+  schedule:
+    - cron: '23 4 * * 1' # Mondays, 04:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # -- Beta toolchain canary (not a required check) ------------------
+  beta:
+    name: Beta toolchain
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'vhexl' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust beta
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: beta
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Test with all features
+        run: cargo test --locked --all-features
+
+      - name: Test without default features
+        run: cargo test --locked --no-default-features
+
+      - name: Build no_std target
+        run: cargo build --locked --target riscv32imac-unknown-none-elf --all-features
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --all-features --no-deps
