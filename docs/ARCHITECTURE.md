@@ -1,6 +1,7 @@
 # led-strip Driver Architecture
 
-> **Version**: 0.3.0 + unreleased fixes &emsp; **Edition**: Rust 2024 &emsp; **MSRV**: 1.88
+> Package version, Rust edition, and MSRV are declared in [`Cargo.toml`](../Cargo.toml).
+> CI reads the MSRV from `package.rust-version` in that manifest.
 
 ## 1. Overview
 

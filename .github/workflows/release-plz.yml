@@ -1,8 +1,8 @@
 name: Release-plz
 
-# After merging to main, release-plz:
-# 1. Opens/updates a Release PR with version bumps and changelog
-# 2. On Release PR merge: publishes to crates.io and creates a GitHub release
+# After a push to main, release-plz opens/updates a Release PR.
+# Publishing waits for successful push CI on the same main commit.
+# release-plz.toml limits publication to Release PR revisions.
 
 on:
   push:
@@ -12,9 +12,43 @@ on:
 permissions: {}
 
 jobs:
+  # Keep the publish event as push for crates.io Trusted Publishing. This job
+  # waits for the existing CI run without duplicating CI or gaining write access.
+  wait-for-ci:
+    name: Wait for CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ github.repository_owner == 'vhexl' }}
+    permissions:
+      actions: read
+      checks: read # needed by gh run watch
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - name: Wait for successful push CI
+        id: ci
+        run: |
+          run_id=
+          for attempt in {1..30}; do
+            run_id=$(gh run list --repo "$GH_REPO" --workflow ci.yml --branch main --event push --commit "$RELEASE_SHA" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::No push CI run found for main commit $RELEASE_SHA."
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$GH_REPO" --interval 10 --exit-status
+
   # -- Publish to crates.io + create GitHub release ------------------
   release-plz-release:
     name: Release-plz release
+    needs: wait-for-ci
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'vhexl' }}
     permissions:
@@ -25,6 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -34,6 +69,10 @@ jobs:
           toolchain: stable
 
       - name: Run release-plz release
+        # Keep this CI-validated revision even when main has advanced. The config
+        # skips ordinary commits instead of publishing them with a prepared version.
+        # release-plz may select the merged Release PR's ancestor commit for the
+        # package/tag, following its built-in release commit selection.
         uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
         with:
           command: release
@@ -48,7 +87,8 @@ jobs:
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'vhexl' }}
+    timeout-minutes: 15
+    if: ${{ github.repository_owner == 'vhexl' && github.event_name == 'push' }}
     permissions:
       contents: write # needed to push version bump branches
       pull-requests: write # needed to create/update the Release PR
@@ -72,6 +112,6 @@ jobs:
         with:
           command: release-pr
         env:
-          # PRs opened with GITHUB_TOKEN do not trigger CI; set RELEASE_PLZ_TOKEN
-          # (a PAT or GitHub App token) to run the checks on release PRs.
+          # GITHUB_TOKEN-created/updated PRs need a maintainer to approve CI.
+          # Set RELEASE_PLZ_TOKEN (a PAT or GitHub App token) for automatic CI.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

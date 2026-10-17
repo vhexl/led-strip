@@ -1,8 +1,8 @@
 name: Rust beta
 
-# Early warning for the next stable Rust release. A red run is a signal to
-# investigate, not a merge blocker: this workflow is not part of the required
-# CI checks.
+# Early warning for the next stable Rust release and dependency advisories.
+# A red run is a signal to investigate, not a merge blocker: this workflow is
+# not part of the required CI checks.
 # Clippy is deliberately not run here: new beta lints report style, not
 # compatibility, and denying warnings would turn them into failures.
 
@@ -50,7 +50,30 @@ jobs:
       - name: Build no_std target
         run: cargo build --locked --target riscv32imac-unknown-none-elf --all-features
 
+      - name: Build no_std target without default features
+        run: cargo build --locked --target riscv32imac-unknown-none-elf --no-default-features
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --all-features --no-deps
+
+      - name: Documentation without default features
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-default-features --no-deps
+
+  # Run independently so beta failures cannot skip the weekly dependency audit.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'vhexl' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

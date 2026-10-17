@@ -56,10 +56,19 @@ strip.write(&pixels).unwrap();
 
 1. 每次推送到 `main` 分支，release-plz 会自动创建/更新一个 **Release PR**，
    包含版本号与基于 [约定式提交](https://www.conventionalcommits.org/) 生成的更新日志。
-2. 合并 Release PR 后，release-plz 将自动：
-   - 创建 git 标签（`v<version>`）
-   - 发布到 [crates.io](https://crates.io/crates/led-strip)
-   - 创建 GitHub Release 及发布说明
+2. 等待 Release PR 的 **CI success** 检查通过后再合并。使用默认 `GITHUB_TOKEN`
+   创建的 PR，需要维护者先点击 **Approve workflows to run**；也可配置可选的
+   `RELEASE_PLZ_TOKEN`，使 PR 的 CI 自动运行。
+3. 发布工作流等待同一提交在 `main` 上的 push CI 通过，再由发布任务检出
+   这个已验证的提交并运行 release-plz。配置 `release_always = false` 后，
+   只有关联 `release-plz-` 前缀分支 PR 的提交具备发布资格。
+   即使 `main` 已有后续提交，已合并的 Release PR 仍可发布；后续普通提交
+   不会沿用它准备的版本发布。release-plz 按自身规则选择发布提交，
+   发布到 [crates.io](https://crates.io/crates/led-strip)，并创建 git 标签
+   （`v<version>`）、GitHub Release 及发布说明。
+
+维护者需要单独配置 `CI success` 必需检查和 crates.io Trusted Publisher；
+提交工作流文件不会自动启用这些设置。
 
 ## 许可证
 

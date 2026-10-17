@@ -15,3 +15,17 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # Exercise dependency updates through the existing pull-request CI.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+    groups:
+      cargo:
+        patterns:
+          - "*"

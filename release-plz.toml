@@ -1,0 +1,3 @@
+[workspace]
+# Publish only Release PR revisions, even if later main commits finish CI first.
+release_always = false

@@ -57,10 +57,21 @@ This project uses [release-plz](https://release-plz.dev/) to automate releases:
 1. Every push to `main` triggers release-plz to open/update a **Release PR**
    with the correct version bumps and a changelog derived from
    [Conventional Commits](https://www.conventionalcommits.org/).
-2. Merge the Release PR when ready — release-plz will then:
-   - Create the git tag (`v<version>`)
-   - Publish to [crates.io](https://crates.io/crates/led-strip)
-   - Create a GitHub release with release notes
+2. Wait for the Release PR's **CI success** check, then merge it. If the PR was
+   created with the default `GITHUB_TOKEN`, a maintainer must first select
+   **Approve workflows to run**; an optional `RELEASE_PLZ_TOKEN` can automate this.
+3. The release workflow waits for the same commit's `main` push CI to succeed.
+   The release job then checks out that tested commit and runs release-plz.
+   With `release_always = false`, only commits associated with a PR from a
+   `release-plz-` prefixed branch are eligible to publish. A merged Release PR
+   remains eligible if `main` advances; later ordinary commits do not publish
+   its prepared version. Release-plz uses its own release commit selection to
+   publish to
+   [crates.io](https://crates.io/crates/led-strip) and create the git tag
+   (`v<version>`) and GitHub release with release notes.
+
+Maintainers must configure the `CI success` required check and crates.io Trusted
+Publisher separately; workflow files alone do not enable these settings.
 
 ## License
 
