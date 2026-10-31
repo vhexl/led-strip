@@ -73,7 +73,7 @@ jobs:
         # skips ordinary commits instead of publishing them with a prepared version.
         # release-plz may select the merged Release PR's ancestor commit for the
         # package/tag, following its built-in release commit selection.
-        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        uses: release-plz/action@b2baf303c463c223526d52a8a91b0777f052cf3f # v0.5.146
         with:
           command: release
         env:
@@ -108,7 +108,7 @@ jobs:
           toolchain: stable
 
       - name: Run release-plz release-pr
-        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        uses: release-plz/action@b2baf303c463c223526d52a8a91b0777f052cf3f # v0.5.146
         with:
           command: release-pr
         env:
